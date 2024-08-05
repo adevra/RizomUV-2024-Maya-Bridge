@@ -1,6 +1,3 @@
-## RizomUV 2024 - Maya Bridge
-# A. Devran @ 2024 https://github.com/adevra/RizomUV-2024-Maya-Bridge
-
 import maya.cmds as cmds
 import subprocess, tempfile, os, platform
 import maya.mel as mel
@@ -87,13 +84,181 @@ class RizomUVBridgeUI(QtWidgets.QDialog):
         self.instant_button.clicked.connect(self.rizom_auto_roundtrip)
 
     def send_to_rizom(self):
-        sendToRizom()
+        self.sendToRizom()
 
     def get_from_rizom(self):
-        getFromRizom()
+        self.getFromRizom()
 
     def rizom_auto_roundtrip(self):
-        rizomAutoRoundtrip()
+        self.rizomAutoRoundtrip()
+
+    def sendToRizom(self):
+        obj = cmds.ls(selection=True, geometry=True, ap=True, dag=True)
+        exportFile = tempfile.gettempdir() + os.sep + "RizomUVMayaBridge.obj"
+        cmds.file(exportFile, f=1, pr=1, typ="OBJexport", es=1, op="groups=1;ptgroups=1;materials=1;smoothing=1;normals=1")
+        if self.uv_check.isChecked():
+            cmd = '"' + rizomPath + '" "' + exportFile + '"'
+        else:
+            cmd = '"' + rizomPath + '" /nu "' + exportFile + '"'
+        if platform.system() == "Windows":
+            subprocess.Popen(cmd)
+        else:
+            subprocess.Popen(["open", "-a", rizomPath, "--args", exportFile])
+
+    def getFromRizom(self):
+        originalOBJs = cmds.ls(selection=True, geometry=True, ap=True, dag=True)
+        exportFile = tempfile.gettempdir() + os.sep + "RizomUVMayaBridge.obj"
+        originalMaterials = {}
+        for obj in originalOBJs:
+            shadingGroups = cmds.listConnections(obj, type='shadingEngine')
+            materials = cmds.ls(cmds.listConnections(shadingGroups), materials=True)
+            originalMaterials[obj] = materials
+        
+        allNamespaces = cmds.namespaceInfo(listOnlyNamespaces=True)
+        for ns in allNamespaces:
+            if "RIZOMUV" in ns:
+                try:
+                    cmds.namespace(removeNamespace=ns, mergeNamespaceWithRoot=True)
+                except:
+                    pass
+
+        if self.line_check.isChecked():
+            with open(exportFile, "r") as f:
+                lines = f.readlines()
+            with open(exportFile, "w") as f:
+                for line in lines:
+                    if not line.startswith("#ZOMPROPERTIES"):
+                        f.write(line)
+
+        cmds.file(exportFile, i=1, typ="OBJ", pr=1, op="mo=1", ns="RIZOMUV")
+        importedOBJs = cmds.ls("RIZOMUV:*", geometry=True, o=True, s=False)
+        cmds.select(clear=True)
+        actualReplacedUVOJBs = []
+
+        for obj in originalOBJs:
+            for imp in importedOBJs:
+                if obj.replace("Shape", "") in imp:
+                    try:
+                        cmds.polyTransfer(obj.replace("Shape", ""), vc=0, uv=1, v=0, ao=imp)
+                        actualReplacedUVOJBs.append(obj.replace("Shape", ""))
+                    except:
+                        pass
+                    break
+        
+        for obj in importedOBJs:
+            try:
+                cmds.select(obj, r=True)
+                cmds.delete()
+            except:
+                pass
+
+        for obj in actualReplacedUVOJBs:
+            cmds.select(obj, add=True)
+
+        for obj in actualReplacedUVOJBs:
+            if obj in originalMaterials:
+                for material in originalMaterials[obj]:
+                    cmds.select(obj)
+                    cmds.hyperShade(assign=material)
+
+        null_objects = [obj for obj in cmds.ls("RIZOMUV:*", dag=True, ap=True) if not cmds.listRelatives(obj, c=True)]
+        if null_objects:
+            cmds.delete(null_objects)
+
+    def rizomAutoRoundtrip(self):
+        originalOBJs = cmds.ls(selection=True, geometry=True, ap=True, dag=True)
+        if not originalOBJs:
+            cmds.warning("No objects selected.")
+            return
+
+        exportFile = tempfile.gettempdir() + os.sep + "RizomUVMayaBridge.obj"
+        
+        originalMaterials = {}
+        for obj in originalOBJs:
+            shadingGroups = cmds.listConnections(obj, type='shadingEngine')
+            materials = cmds.ls(cmds.listConnections(shadingGroups), materials=True)
+            originalMaterials[obj] = materials
+
+        cmds.file(exportFile, f=1, pr=1, typ="OBJexport", es=1, op="groups=1;ptgroups=1;materials=1;smoothing=1;normals=1")
+
+        luascript = """
+ZomLoad({File={Path="rizomFilePath", ImportGroups=true, XYZ=true}, NormalizeUVW=true})
+ZomSelect({PrimType="Edge", Select=true, ResetBefore=true, Auto={ByAngle={Angle=45, Seams=false}, BySharpness=45, Seams=true, ByGroup=true}})
+ZomCut({PrimType="Edge"})
+ZomUnfold({PrimType="Island", MinAngle=1e-005, Mix=1, Iterations=1, PreIterations=5, StopIfOutOFDomain=false, RoomSpace=0, BorderIntersections=true, TriangleFlips=true})
+ZomIslandGroups({Mode="DistributeInTilesEvenly", MergingPolicy=8322, GroupPath="RootGroup"})
+ZomPack({ProcessTileSelection=false, RecursionDepth=1, RootGroup="RootGroup", Scaling={Mode=2}, Rotate={}, Translate=true, LayoutScalingMode=2})
+ZomSave({File={Path="rizomFilePath", UVWProps=true}, __UpdateUIObjFileName=true})
+ZomQuit()
+"""
+        
+        luaFile = tempfile.gettempdir() + os.sep + "riz.lua"
+        with open(luaFile, "w") as f:
+            f.write(luascript.replace("rizomFilePath", exportFile.replace("\\", "/")))
+
+        cmd = '"' + rizomPath + '" -cfi "' + luaFile + '"'
+        if platform.system() == "Windows":
+            subprocess.call(cmd, shell=False)
+        else:
+            os.system('open -W "' + rizomPath + '" --args -cfi "' + luaFile + '"')
+
+        if self.line_check.isChecked():
+            with open(exportFile, "r") as f:
+                lines = f.readlines()
+            with open(exportFile, "w") as f:
+                for line in lines:
+                    if not line.startswith("#ZOMPROPERTIES"):
+                        f.write(line)
+
+        allNamespaces = cmds.namespaceInfo(listOnlyNamespaces=True)
+        for ns in allNamespaces:
+            if "RIZOMUV" in ns:
+                try:
+                    cmds.namespace(removeNamespace=ns, mergeNamespaceWithRoot=True)
+                except:
+                    pass
+
+        cmds.file(exportFile, i=1, typ="OBJ", pr=1, op="mo=1", ns="RIZOMUV")
+        importedOBJs = cmds.ls("RIZOMUV:*", geometry=True, o=True, s=False)
+
+        if not importedOBJs:
+            cmds.warning("No objects imported from RizomUV.")
+            return
+
+        cmds.select(clear=True)
+        actualReplacedUVOJBs = []
+        for obj in originalOBJs:
+            for imp in importedOBJs:
+                if obj.replace("Shape", "") in imp:
+                    try:
+                        cmds.polyTransfer(obj.replace("Shape", ""), vc=0, uv=1, v=0, ao=imp)
+                        actualReplacedUVOJBs.append(obj.replace("Shape", ""))
+                    except Exception as e:
+                        cmds.warning(f"Error transferring UVs for {obj}: {e}")
+                    break
+
+        for obj in importedOBJs:
+            try:
+                cmds.select(obj, r=True)
+                cmds.delete()
+            except:
+                pass
+
+        for obj in actualReplacedUVOJBs:
+            cmds.select(obj, add=True)
+
+        for obj in actualReplacedUVOJBs:
+            if obj in originalMaterials:
+                for material in originalMaterials[obj]:
+                    cmds.select(obj)
+                    cmds.hyperShade(assign=material)
+
+        null_objects = [obj for obj in cmds.ls("RIZOMUV:*", dag=True, ap=True) if not cmds.listRelatives(obj, c=True)]
+        if null_objects:
+            cmds.delete(null_objects)
+
+        if os.path.exists(luaFile):
+            os.remove(luaFile)
 
 def show_rizom_uv_bridge_ui():
     try:
@@ -107,174 +272,6 @@ def show_rizom_uv_bridge_ui():
     rizom_uv_bridge_ui = RizomUVBridgeUI(parent=maya_main_window())
     rizom_uv_bridge_ui.setObjectName("RizomUVBridgeWin")
     rizom_uv_bridge_ui.show()
-
-def sendToRizom(*args):
-    obj = cmds.ls(selection=True, geometry=True, ap=True, dag=True)
-    exportFile = tempfile.gettempdir() + os.sep + "RizomUVMayaBridge.obj"
-    cmds.file(exportFile, f=1, pr=1, typ="OBJexport", es=1, op="groups=1;ptgroups=1;materials=1;smoothing=1;normals=1")
-    if cmds.checkBox('uvcheck', query=True, value=True):
-        cmd = '"' + rizomPath + '" "' + exportFile + '"'
-    else:
-        cmd = '"' + rizomPath + '" /nu "' + exportFile + '"'
-    if platform.system() == "Windows":
-        subprocess.Popen(cmd)
-    else:
-        subprocess.Popen(["open", "-a", rizomPath, "--args", exportFile])
-
-def getFromRizom(*args):
-    originalOBJs = cmds.ls(selection=True, geometry=True, ap=True, dag=True)
-    exportFile = tempfile.gettempdir() + os.sep + "RizomUVMayaBridge.obj"
-    originalMaterials = {}
-    for obj in originalOBJs:
-        shadingGroups = cmds.listConnections(obj, type='shadingEngine')
-        materials = cmds.ls(cmds.listConnections(shadingGroups), materials=True)
-        originalMaterials[obj] = materials
-    
-    allNamespaces = cmds.namespaceInfo(listOnlyNamespaces=True)
-    for ns in allNamespaces:
-        if "RIZOMUV" in ns:
-            try:
-                cmds.namespace(removeNamespace=ns, mergeNamespaceWithRoot=True)
-            except:
-                pass
-
-    if cmds.checkBox('linecheck', query=True, value=True):
-        with open(exportFile, "r") as f:
-            lines = f.readlines()
-        with open(exportFile, "w") as f:
-            for line in lines:
-                if not line.startswith("#ZOMPROPERTIES"):
-                    f.write(line)
-
-    cmds.file(exportFile, i=1, typ="OBJ", pr=1, op="mo=1", ns="RIZOMUV")
-    importedOBJs = cmds.ls("RIZOMUV:*", geometry=True, o=True, s=False)
-    cmds.select(clear=True)
-    actualReplacedUVOJBs = []
-
-    for obj in originalOBJs:
-        for imp in importedOBJs:
-            if obj.replace("Shape", "") in imp:
-                try:
-                    cmds.polyTransfer(obj.replace("Shape", ""), vc=0, uv=1, v=0, ao=imp)
-                    actualReplacedUVOJBs.append(obj.replace("Shape", ""))
-                except:
-                    pass
-                break
-    
-    for obj in importedOBJs:
-        try:
-            cmds.select(obj, r=True)
-            cmds.delete()
-        except:
-            pass
-
-    for obj in actualReplacedUVOJBs:
-        cmds.select(obj, add=True)
-
-    for obj in actualReplacedUVOJBs:
-        if obj in originalMaterials:
-            for material in originalMaterials[obj]:
-                cmds.select(obj)
-                cmds.hyperShade(assign=material)
-
-    null_objects = [obj for obj in cmds.ls("RIZOMUV:*", dag=True, ap=True) if not cmds.listRelatives(obj, c=True)]
-    if null_objects:
-        cmds.delete(null_objects)
-
-def rizomAutoRoundtrip(*args):
-    originalOBJs = cmds.ls(selection=True, geometry=True, ap=True, dag=True)
-    if not originalOBJs:
-        cmds.warning("No objects selected.")
-        return
-
-    exportFile = tempfile.gettempdir() + os.sep + "RizomUVMayaBridge.obj"
-    
-    originalMaterials = {}
-    for obj in originalOBJs:
-        shadingGroups = cmds.listConnections(obj, type='shadingEngine')
-        materials = cmds.ls(cmds.listConnections(shadingGroups), materials=True)
-        originalMaterials[obj] = materials
-
-    cmds.file(exportFile, f=1, pr=1, typ="OBJexport", es=1, op="groups=1;ptgroups=1;materials=1;smoothing=1;normals=1")
-
-    luascript = """
-ZomLoad({File={Path="rizomFilePath", ImportGroups=true, XYZ=true}, NormalizeUVW=true})
-ZomSelect({PrimType="Edge", Select=true, ResetBefore=true, Auto={ByAngle={Angle=45, Seams=false}, BySharpness=45, Seams=true, ByGroup=true}})
-ZomCut({PrimType="Edge"})
-ZomUnfold({PrimType="Island", MinAngle=1e-005, Mix=1, Iterations=1, PreIterations=5, StopIfOutOFDomain=false, RoomSpace=0, BorderIntersections=true, TriangleFlips=true})
-ZomIslandGroups({Mode="DistributeInTilesEvenly", MergingPolicy=8322, GroupPath="RootGroup"})
-ZomPack({ProcessTileSelection=false, RecursionDepth=1, RootGroup="RootGroup", Scaling={Mode=2}, Rotate={}, Translate=true, LayoutScalingMode=2})
-ZomSave({File={Path="rizomFilePath", UVWProps=true}, __UpdateUIObjFileName=true})
-ZomQuit()
-"""
-    
-    luaFile = tempfile.gettempdir() + os.sep + "riz.lua"
-    with open(luaFile, "w") as f:
-        f.write(luascript.replace("rizomFilePath", exportFile.replace("\\", "/")))
-
-    cmd = '"' + rizomPath + '" -cfi "' + luaFile + '"'
-    if platform.system() == "Windows":
-        subprocess.call(cmd, shell=False)
-    else:
-        os.system('open -W "' + rizomPath + '" --args -cfi "' + luaFile + '"')
-
-    if cmds.checkBox('linecheck', query=True, value=True):
-        with open(exportFile, "r") as f:
-            lines = f.readlines()
-        with open(exportFile, "w") as f:
-            for line in lines:
-                if not line.startswith("#ZOMPROPERTIES"):
-                    f.write(line)
-
-    allNamespaces = cmds.namespaceInfo(listOnlyNamespaces=True)
-    for ns in allNamespaces:
-        if "RIZOMUV" in ns:
-            try:
-                cmds.namespace(removeNamespace=ns, mergeNamespaceWithRoot=True)
-            except:
-                pass
-
-    cmds.file(exportFile, i=1, typ="OBJ", pr=1, op="mo=1", ns="RIZOMUV")
-    importedOBJs = cmds.ls("RIZOMUV:*", geometry=True, o=True, s=False)
-
-    if not importedOBJs:
-        cmds.warning("No objects imported from RizomUV.")
-        return
-
-    cmds.select(clear=True)
-    actualReplacedUVOJBs = []
-    for obj in originalOBJs:
-        for imp in importedOBJs:
-            if obj.replace("Shape", "") in imp:
-                try:
-                    cmds.polyTransfer(obj.replace("Shape", ""), vc=0, uv=1, v=0, ao=imp)
-                    actualReplacedUVOJBs.append(obj.replace("Shape", ""))
-                except Exception as e:
-                    cmds.warning(f"Error transferring UVs for {obj}: {e}")
-                break
-
-    for obj in importedOBJs:
-        try:
-            cmds.select(obj, r=True)
-            cmds.delete()
-        except:
-            pass
-
-    for obj in actualReplacedUVOJBs:
-        cmds.select(obj, add=True)
-
-    for obj in actualReplacedUVOJBs:
-        if obj in originalMaterials:
-            for material in originalMaterials[obj]:
-                cmds.select(obj)
-                cmds.hyperShade(assign=material)
-
-    null_objects = [obj for obj in cmds.ls("RIZOMUV:*", dag=True, ap=True) if not cmds.listRelatives(obj, c=True)]
-    if null_objects:
-        cmds.delete(null_objects)
-
-    if os.path.exists(luaFile):
-        os.remove(luaFile)
 
 if __name__ == "__main__":
     show_rizom_uv_bridge_ui()
