@@ -45,8 +45,7 @@ Optionally, check Long Line Fix if you want to remove long lines from the import
 Instant UVs:
 Use the Instant UVs button for an automated roundtrip workflow, sending the selected geometry to RizomUV, processing the UVs, and importing them back into Maya with one click.
 
-## License
-This project is licensed under the MIT License. See the LICENSE file for details.
+
 
 ## Contributing
 Contributions are welcome! Please fork the repository and submit pull requests for any enhancements or bug fixes.
