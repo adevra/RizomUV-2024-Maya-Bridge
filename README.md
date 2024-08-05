@@ -2,7 +2,7 @@
 
 # RizomUV 2024 Bridge for Maya
 
-Initially started as an update for the official 2018 version turned out to be a major re-write, The RizomUV 2024 Bridge for Maya provides a seamless workflow between Autodesk Maya and RizomUV, allowing users to easily transfer UV data for advanced UV unwrapping and packing. 
+Initially started as an update for the Official Origami Digital Maya 2018 Bridge by Oliver Hotz, turned out to be a major re-write, The RizomUV 2024 Bridge for Maya provides a seamless workflow between Autodesk Maya and RizomUV, allowing users to easily transfer UV data for advanced UV unwrapping and packing. 
 
 
 ## New Features
