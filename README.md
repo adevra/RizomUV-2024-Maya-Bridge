@@ -1,4 +1,4 @@
-[![ssbridge.png](https://i.postimg.cc/YSXwpyTK/ssbridge.png)](https://postimg.cc/yJSGjnVv)
+[![ssbridge.png](https://i.postimg.cc/YSXwpyTK/ssbridge.png)]
 
 # RizomUV 2024 Bridge for Maya
 
