@@ -7,7 +7,7 @@ import platform
 def onMayaDroppedPythonFile(*args):
     try:
         installer_directory = os.path.dirname(__file__)
-        script_file_path = os.path.join(installer_directory, "maya_rizomuv_bridge.py")
+        script_file_path = os.path.join(installer_directory, "maya_rizomuv_bridge_2024.py")
         shelf_icon_path = os.path.join(installer_directory, "rzmuv.png")
         
         if not os.path.exists(script_file_path):
@@ -80,7 +80,7 @@ def onMayaDroppedPythonFile(*args):
             style="iconOnly",
             marginWidth=1,
             marginHeight=1,
-            command="import maya_rizomuv_bridge; maya_rizomuv_bridge.createUI()"
+            command="import maya_rizomuv_bridge; maya_rizomuv_bridge.show_rizom_uv_bridge_ui()"
         )
 
         cmds.confirmDialog(message="Script successfully installed to: {0}".format(scripts_dir),

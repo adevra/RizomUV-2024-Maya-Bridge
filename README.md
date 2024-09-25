@@ -12,12 +12,6 @@ Initially started as an update for the Official Origami Digital Maya 2018 Bridge
 - **Material Assignment Preservation**: Maintains original material assignments after UV data is transferred back to Maya.
 - **Modern UI**: Script UI now matches the RizomUV 2024 colors
 
-## Repository Structure
-
-This repository includes support for both Python 2 and Python 3 versions of Maya:
-
-- `/RizomUV Bridge 2024/`: Scripts for Maya versions using Python 3.
-- `/RizomUV Bridge 2024 py2/`: Scripts for Maya versions using Python 2.
 
 ## Installation
 
