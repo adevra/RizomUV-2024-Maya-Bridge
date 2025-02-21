@@ -1,48 +1,51 @@
-![ssbridge.png](https://i.postimg.cc/YSXwpyTK/ssbridge.png)
+![ssbridge.png](https://blog.anildevran.com/content/images/2025/02/rizomuvmayabridgecover_adev.png)
 
-# RizomUV 2024 Bridge for Maya
+# RIZOM UV 2024 - Autodesk MAYA Bridge
 
-Initially started as an update for the Official Origami Digital Maya 2018 Bridge by Oliver Hotz, turned out to be a major re-write, The RizomUV 2024 Bridge for Maya provides a seamless workflow between Autodesk Maya and RizomUV, allowing users to easily transfer UV data for advanced UV unwrapping and packing. 
+**Version 2.0.0** | **Author:** A. Devran | **GitHub:** [https://github.com/adevra/RizomUV-2024-Maya-Bridge](https://github.com/adevra/RizomUV-2024-Maya-Bridge)
 
+Bridge plugin for **Autodesk Maya** (2022–2025) and **RizomUV 2024**, for a convenient, native like UV unwrapping and packing workflow. Works on Windows, macOS, and Linux.
 
-## New Features
+---
 
-- **Drag-and-Drop Installer**: Installer script will handle everything. 
-- **Namespace Handling**: Ensures that imported objects are correctly namespaced, avoiding multiple namespace entries upon each transfer.
-- **Material Assignment Preservation**: Maintains original material assignments after UV data is transferred back to Maya.
-- **Modern UI**: Script UI now matches the RizomUV 2024 colors
+## Features
+- Easy drag-and-drop installer with shelf button.
+- Send meshes to RizomUV and retrieve UVs.
+- UV set support.
+- Auto-pack UVs with adjustable quality.
+- Harden UV edges post-import.
+- Modern, dockable UI.
 
+---
 
 ## Installation
+1. Download and extract the ZIP from Releases page.
+2. Open Maya (2022–2025).
+3. Drag `drag_and_drop_install.py` into the viewport.
+4. Select your RizomUV executable when prompted.
+5. A shelf button is added. Click to start!
+#### (if you have previous version installed, please remove it from your /maya/scripts folder and remove shelf button)
 
-1. **Download the Repository**: Download the repository from Github.
-2. **Choose the Correct Folder**: Navigate to the folder corresponding to your Maya Python version **(use py2 for Maya versions below 2022)**.
-3. **Drag-and-Drop Installer**: Locate the **drag_and_drop_install.py** script within the chosen folder.
-Drag and drop this file into the Maya viewport. Installer will prompt with a file browser to select RizomUV executable, (most likely inside C:\Program Files\Rizom Lab\...)
-it will then, add a shelf button under the currently active shelf. 
+---
 
 ## Usage
+- **Send to RizomUV:** Select mesh, click "Send to RizomUV."
+- **Auto Pack:** Select mesh, click "Auto Pack" to unwrap and pack UVs.
+- **Get UVs:** Select mesh, click "Get UVs" after editing in RizomUV.
+- **Any modifications to UVs in different UVSets will also be transferred.*
+- **Harden UV Edges:** Select mesh, click "Harden UV Edges" to refine. Extremely useful if you are unwrapping for game assets.
 
-Open the Script UI: 
-After installation, a new shelf button will be available in Maya. Click this button to open the RizomUV 2024 Bridge UI.
+---
 
-Send Selected Geometry to RizomUV:
-Select meshes in Maya.
-In the RizomUV 2024 Bridge UI, click the **Send Selected** button.
-Optionally, check Transfer Existing UVs to Rizom if you want to include the existing UVs in the transfer.
+## Requirements
+- **Maya:** 2022–2025
+- **RizomUV:** 2024.0+
+- **OS:** Windows, macOS, or Linux
 
-Get UVs from RizomUV:
-After editing UVs in RizomUV simply CTRL+S and save that file. 
-Go back to Maya viewport and select the meshes you want to replace their UVs and click the **Get UVs** button.
-Optionally, check Long Line Fix if you want to remove long lines from the imported UV data.
-
-Instant UVs:
-Use the Instant UVs button for an automated roundtrip workflow, sending the selected geometry to RizomUV, processing the UVs, and importing them back into Maya with one click.
-
-
-
-## Contributing
-Contributions are welcome! Please fork the repository and submit pull requests for any enhancements or bug fixes.
+---
 
 ## Support
-For any issues or questions, please open an issue on the GitHub repository.
+Issues?  
+  Open a ticket [here](https://github.com/adevra/RizomUV-2024-Maya-Bridge/issues).
+
+🤖 or visit the official [RizomUV Discord Channel](https://discord.com/channels/373032486667550731/1280518135853879296) > Bridges > maya-adev channel.

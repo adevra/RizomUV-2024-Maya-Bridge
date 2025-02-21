@@ -3,6 +3,7 @@ import shutil
 import maya.cmds as cmds
 import maya.mel as mel
 import platform
+import sys
 
 def onMayaDroppedPythonFile(*args):
     try:
@@ -15,30 +16,44 @@ def onMayaDroppedPythonFile(*args):
         if not os.path.exists(shelf_icon_path):
             raise RuntimeError("Unable to find 'rzmuv.png' relative to this installer")
         
-        if platform.system() == "Windows":
+        system = platform.system()
+        if system == "Windows":
             file_filter = "Executable Files (*.exe)"
-        elif platform.system() == "Darwin":
+            default_path = r"C:\Program Files\Rizom Lab\RizomUV 2024.0\rizomuv.exe"
+        elif system == "Darwin":
             file_filter = "Applications (*.app)"
+            default_path = "/Applications/RizomUV 2024.0.app"
         else:
-            file_filter = "All Files (*.*)"
+            file_filter = "Executable Files (*)"
+            default_path = "/usr/local/bin/rizomuv"
         
-        rizomPath = cmds.fileDialog2(fileMode=1, caption="Select RizomUV Executable", fileFilter=file_filter)[0]
+        rizomPath = cmds.fileDialog2(fileMode=1, caption="Select RizomUV Executable", fileFilter=file_filter, startingDirectory=os.path.dirname(default_path))[0]
+        if not rizomPath:
+            raise RuntimeError("No RizomUV executable selected.")
         
         with open(script_file_path, 'r') as file:
             script_content = file.read()
 
-        placeholder_paths = [
-            r"rizomPath = r'C:\\Program Files\\Rizom Lab\\RizomUV 2024.0\\rizomuv.exe'",
-            r"rizomPath = r'C:\Program Files\Rizom Lab\RizomUV 2024.0\rizomuv.exe'"
-        ]
-
-        for placeholder_path in placeholder_paths:
-            if placeholder_path in script_content:
-                script_content = script_content.replace(placeholder_path, f"rizomPath = r'{rizomPath}'")
-                break
+        # Update PATH_DEFAULTS dictionary in the script using string concatenation
+        placeholder = 'PATH_DEFAULTS = {'
+        if placeholder in script_content:
+            windows_path = rizomPath if system == "Windows" else r"C:\Program Files\Rizom Lab\RizomUV 2024.0\rizomuv.exe"
+            darwin_path = rizomPath if system == "Darwin" else "/Applications/RizomUV 2024.0.app"
+            linux_path = rizomPath if system == "Linux" else "/usr/local/bin/rizomuv"
+            new_default_paths = (
+                'PATH_DEFAULTS = {\n'
+                '    "Windows": r"' + windows_path + '",\n'
+                '    "Darwin": "' + darwin_path + '",\n'
+                '    "Linux": "' + linux_path + '"\n'
+                '}'
+            )
+            start_idx = script_content.index(placeholder)
+            end_idx = script_content.index('}', start_idx) + 1
+            script_content = script_content[:start_idx] + new_default_paths + script_content[end_idx:]
         else:
-            raise RuntimeError("Placeholder path not found in the script.")
+            raise RuntimeError("PATH_DEFAULTS dictionary not found in the script.")
         
+        # Write updated script
         updated_script_file_path = os.path.join(installer_directory, "maya_rizomuv_bridge_updated.py")
         with open(updated_script_file_path, 'w') as file:
             file.write(script_content)
@@ -52,7 +67,6 @@ def onMayaDroppedPythonFile(*args):
         os.remove(updated_script_file_path)
 
         absolute_shelf_icon_path = os.path.join(scripts_dir, "rzmuv.png").replace("\\", "/")
-
         current_shelf = mel.eval("string $currentShelf = `tabLayout -query -selectTab $gShelfTopLevel`;")
         cmds.setParent(current_shelf)
         cmds.shelfButton(
@@ -80,14 +94,13 @@ def onMayaDroppedPythonFile(*args):
             style="iconOnly",
             marginWidth=1,
             marginHeight=1,
-            command="import maya_rizomuv_bridge; maya_rizomuv_bridge.createUI()"
+            command="import maya_rizomuv_bridge; maya_rizomuv_bridge.launch_tool()"
         )
 
-        cmds.confirmDialog(message="Script successfully installed to: {0}".format(scripts_dir),
-                           title="Confirmation dialog")
+        cmds.confirmDialog(message=f"Script successfully installed to: {scripts_dir}", title="Confirmation dialog")
     
     except Exception as e:
-        cmds.confirmDialog(message="Script failed to install: {0}".format(e), icon="warning", title="ERROR")
+        cmds.confirmDialog(message=f"Script failed to install: {e}", icon="warning", title="ERROR")
 
 if __name__ == "__main__":
     onMayaDroppedPythonFile()
