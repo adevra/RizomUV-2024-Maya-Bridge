@@ -18,7 +18,13 @@ def sendToRizom(*args):
     exportFile = os.path.join(tempfile.gettempdir(), "RizomUVMayaBridge.obj")
     exportFileUnix = exportFile.replace("\\", "/")
     cmds.select(selected_objs, replace=True)
-    export_options = "groups=1;ptgroups=1;materials=1;smoothing=1;normals=1;uvs=1"
+    
+    export_options = "groups=1;ptgroups=1;materials=1;smoothing=1;normals=1"
+    if include_uvs:
+        export_options += ";uvs=1"
+    else:
+        export_options += ";uvs=0"
+    
     cmds.file(
         exportFile,
         force=True,
@@ -28,41 +34,58 @@ def sendToRizom(*args):
         options=export_options
     )
     print(f"Exported OBJ to {exportFile} with {'existing UVs' if include_uvs else 'no existing UVs (will generate new UVs)'}")
+    
     if include_uvs:
         lua_script = f'''
-    ZomLoad({{File={{Path="{exportFileUnix}", ImportGroups=true, UVWProps=true, XYZUVW=true}}, NormalizeUVW=true}})
-        '''
+ZomLoad({{File={{Path="{exportFileUnix}", ImportGroups=true, UVWProps=true, XYZUVW=true}}, NormalizeUVW=false}})
+'''
     else:
         lua_script = f'''
-    ZomLoad({{File={{Path="{exportFileUnix}", ImportGroups=true, XYZ=true}}, NormalizeUVW=true}})
-    ZomUnfold({{PrimType="Island", MinAngle=1e-005, Mix=1, Iterations=1, PreIterations=5, StopIfOutOFDomain=false, RoomSpace=0, BorderIntersections=true, TriangleFlips=true}})
-    ZomPack({{ProcessTileSelection=false, RecursionDepth=1, RootGroup="RootGroup", Scaling={{Mode=2}}, Rotate={{}}, Translate=true, LayoutScalingMode=2}})
-    ZomSave({{File={{Path="{exportFileUnix}", UVWProps=true}}, __UpdateUIObjFileName=true}})
-        '''
+ZomLoad({{File={{Path="{exportFileUnix}", ImportGroups=true, XYZ=true}}, NormalizeUVW=true}})
+ZomUnfold({{PrimType="Island", MinAngle=1e-005, Mix=1, Iterations=1, PreIterations=5, StopIfOutOFDomain=false, RoomSpace=0, BorderIntersections=true, TriangleFlips=true}})
+ZomPack({{ProcessTileSelection=false, RecursionDepth=1, RootGroup="RootGroup", Scaling={{Mode=2}}, Rotate={{}}, Translate=true, LayoutScalingMode=2}})
+ZomSave({{File={{Path="{exportFileUnix}", UVWProps=true}}, __UpdateUIObjFileName=true}})
+'''
+    
+    print("Lua Script:")
+    print(lua_script)
+    
     control_script_path = os.path.join(tempfile.gettempdir(), "rizomuv_control_script.lua")
     control_script_path_unix = control_script_path.replace("\\", "/")
     with open(control_script_path, "w") as f:
         f.write(lua_script)
     print(f"Updated control script at {control_script_path}")
+    
     rizom_running = False
     if platform.system() == "Windows":
         try:
-            tasks = subprocess.check_output(['tasklist']).decode().lower()
+            tasks = subprocess.check_output(['tasklist'], stderr=subprocess.STDOUT).decode().lower()
             if 'rizomuv.exe' in tasks:
+                rizom_running = True
+        except Exception as e:
+            print(f"Error checking if RizomUV is running: {e}")
+    elif platform.system() == "Darwin":  # macOS
+        try:
+            tasks = subprocess.check_output(['pgrep', '-f', 'RizomUV'], stderr=subprocess.STDOUT).decode().lower()
+            if 'rizomuv' in tasks:
                 rizom_running = True
         except Exception as e:
             print(f"Error checking if RizomUV is running: {e}")
     else:
         try:
-            tasks = subprocess.check_output(['ps', 'aux']).decode().lower()
+            tasks = subprocess.check_output(['ps', 'aux'], stderr=subprocess.STDOUT).decode().lower()
             if 'rizomuv' in tasks:
                 rizom_running = True
         except Exception as e:
             print(f"Error checking if RizomUV is running: {e}")
+    
     if not rizom_running:
         print("RizomUV is not running. Starting RizomUV with control script monitoring.")
         if platform.system() == "Windows":
             cmd = f'"{rizomPath}" -cfi "{control_script_path_unix}"'
+            subprocess.Popen(cmd)
+        elif platform.system() == "Darwin":  # macOS
+            cmd = ['open', '-a', rizomPath, '--args', '-cfi', control_script_path_unix]
             subprocess.Popen(cmd)
         else:
             cmd = [rizomPath, '-cfi', control_script_path_unix]
@@ -72,6 +95,7 @@ def sendToRizom(*args):
         print("RizomUV is already running.")
         os.utime(control_script_path, None)
         print("Updated control script file timestamp to trigger RizomUV reload.")
+
 
 def getFromRizom(*args):
     originalOBJs = cmds.ls(selection=True, long=True, transforms=True)
