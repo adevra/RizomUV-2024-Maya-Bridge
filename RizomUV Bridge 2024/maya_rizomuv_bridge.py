@@ -1,5 +1,6 @@
 ## RizomUV 2024 - Maya Bridge
 # A. Devran @ 2024 https://github.com/adevra/RizomUV-2024-Maya-Bridge
+# Minimal functioning version for Maya 2020 and above.
 
 import maya.cmds as cmds
 import subprocess, tempfile, os, platform
