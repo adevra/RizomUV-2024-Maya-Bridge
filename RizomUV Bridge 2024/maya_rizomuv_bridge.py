@@ -4,7 +4,6 @@ import maya.mel as mel
 import maya.OpenMayaUI as omui
 from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
 import subprocess, tempfile, os, platform
-import base64
 import xml.dom.minidom as xml
 import sys
 
@@ -17,7 +16,7 @@ else:
 
 PATH_DEFAULTS = {
     "Windows": r"C:\Program Files\Rizom Lab\RizomUV 2024.0\rizomuv.exe",
-    "Darwin": "/Applications/RizomUV 2024.0.app",
+    "Darwin": "/Applications/RizomUV 2024.1.app",  
     "Linux": "/usr/local/bin/rizomuv"
 }
 
@@ -84,7 +83,6 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         self.build_interface()
         self.setup_handlers()
 
-    # ---------------------------------- Interface Setup ----------------------------------
     def build_interface(self):
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.setSpacing(5)
@@ -167,10 +165,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         self.feedback_label.setAlignment(QtCore.Qt.AlignCenter)
         main_layout.addWidget(self.feedback_label)
 
-        image_data = base64.b64decode(logo_encoded)
         temp_image_path = os.path.join(tempfile.gettempdir(), "rzmuv_logo_ui.png")
-        with open(temp_image_path, "wb") as f:
-            f.write(image_data)
         if os.path.exists(temp_image_path):
             logo = QtWidgets.QLabel()
             pixmap = QtGui.QPixmap(temp_image_path).scaled(100, 100, QtCore.Qt.KeepAspectRatio)
@@ -179,7 +174,6 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             main_layout.addWidget(logo)
         main_layout.addStretch()
 
-    # ---------------------------------- Event Handlers ----------------------------------
     def setup_handlers(self):
         self.transfer_btn.clicked.connect(lambda: self.dispatch_to_rizom(pack=False))
         self.auto_pack_btn.clicked.connect(lambda: self.dispatch_to_rizom(pack=True))
@@ -193,9 +187,11 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         self.tolerance_toggle.stateChanged.connect(self.toggle_tolerance)
         self.angle_adjuster.valueChanged.connect(self.adjust_angle)
 
-    # ---------------------------------- Utility Functions ----------------------------------
     def locate_rizom(self):
-        path = QtWidgets.QFileDialog.getOpenFileName(self, "Locate RizomUV", self.config.rizom_location)[0]
+        if platform.system() == "Darwin":
+            path = QtWidgets.QFileDialog.getOpenFileName(self, "Locate RizomUV", self.config.rizom_location, "Applications (*.app)")[0]
+        else:
+            path = QtWidgets.QFileDialog.getOpenFileName(self, "Locate RizomUV", self.config.rizom_location)[0]
         if path:
             self.location_input.setText(path)
             self.config.rizom_location = path
@@ -224,7 +220,6 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
     def set_feedback(self, message):
         self.feedback_label.setText(message)
 
-    # ---------------------------------- Transfer and Retrieve Functions ----------------------------------
     def dispatch_to_rizom(self, pack=False):
         import time
         selected_items = cmds.ls(selection=True, long=True, transforms=True)
@@ -303,6 +298,20 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
                     rizom_active = True
             except subprocess.CalledProcessError as e:
                 print(f"Failed to check running processes: {e}")
+        elif system == "Darwin":  # macOS
+            try:
+                tasks = subprocess.check_output(['pgrep', '-f', 'RizomUV'], stderr=subprocess.STDOUT).decode().lower()
+                if 'rizomuv' in tasks:
+                    rizom_active = True
+            except subprocess.CalledProcessError as e:
+                print(f"Error checking if RizomUV is running: {e}")
+        else:
+            try:
+                tasks = subprocess.check_output(['ps', 'aux'], stderr=subprocess.STDOUT).decode().lower()
+                if 'rizomuv' in tasks:
+                    rizom_active = True
+            except subprocess.CalledProcessError as e:
+                print(f"Error checking if RizomUV is running: {e}")
         
         if not rizom_active:
             self.set_feedback("Starting RizomUV...")
@@ -310,22 +319,16 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
                 if system == "Windows":
                     cmd = f'"{self.config.rizom_location}" -cfi "{self.config.lua_control_file}"'
                     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    stdout, stderr = process.communicate(timeout=10)
-                    if process.returncode != 0:
-                        raise subprocess.SubprocessError(f"RizomUV failed to start: {stderr.decode()}")
-                elif system == "Darwin":
+                elif system == "Darwin":  # macOS - Use 'open -a' as in your working script
                     cmd = ['open', '-a', self.config.rizom_location, '--args', '-cfi', self.config.lua_control_file]
                     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    stdout, stderr = process.communicate(timeout=10)
-                    if process.returncode != 0:
-                        raise subprocess.SubprocessError(f"RizomUV failed to start: {stderr.decode()}")
                 else:
                     cmd = [self.config.rizom_location, '-cfi', self.config.lua_control_file]
                     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    stdout, stderr = process.communicate(timeout=10)
-                    if process.returncode != 0:
-                        raise subprocess.SubprocessError(f"RizomUV failed to start: {stderr.decode()}")
-                time.sleep(5)
+                stdout, stderr = process.communicate(timeout=10)
+                if process.returncode != 0:
+                    raise subprocess.SubprocessError(f"RizomUV failed to start: {stderr.decode()}")
+                time.sleep(3)
                 self.set_feedback("RizomUV started successfully")
             except (subprocess.SubprocessError, subprocess.TimeoutExpired, Exception) as e:
                 self.set_feedback(f"Failed to start RizomUV: {str(e)}")
@@ -352,10 +355,12 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
             print(f"File not found: {source_file}")
             return
         
+        # Clear existing namespaces
         existing_namespaces = cmds.namespaceInfo(listOnlyNamespaces=True, recurse=True) or []
         for ns in existing_namespaces:
-            if "RIZOMUV" in ns:
+            if "RIZOMUV" in ns.upper():
                 try:
+                    cmds.namespace(setNamespace=':')
                     cmds.namespace(removeNamespace=ns, mergeNamespaceWithRoot=True)
                     print(f"Removed namespace: {ns}")
                 except Exception as e:
@@ -372,15 +377,17 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
         
         mel.eval('FBXImportMode -v "add";')
         
-        import_namespace = "RIZOMUV"
+        import_namespace = "RIZOMUV_TEMP"
+        print(f"Before import - All transforms in scene: {cmds.ls(type='transform', long=True)}")
         try:
             cmds.file(
                 source_file,
                 i=True,
                 type="FBX",
                 ignoreVersion=True,
-                mergeNamespacesOnClash=False,
                 namespace=import_namespace,
+                options="fbx",
+                preserveReferences=False,
                 prompt=False
             )
             print(f"Imported FBX from {source_file} into namespace '{import_namespace}'")
@@ -389,35 +396,35 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
             print(f"Import failed: {e}")
             return
 
-        # Check objects in namespace
-        all_imported = cmds.ls(f"{import_namespace}:*", long=True)
-        print(f"All objects in '{import_namespace}' namespace: {all_imported}")
-
-        imported_items = cmds.ls(f"{import_namespace}:*", transforms=True, long=True)
+        # transform detection
+        imported_items = cmds.ls(f"{import_namespace}:*", transforms=True, long=True) or []
+        print(f"Imported items in namespace '{import_namespace}': {imported_items}")
+        
         if not imported_items:
-            self.set_feedback(f"Error: No transforms found in '{import_namespace}' namespace.")
-            print(f"No transforms found in '{import_namespace}' namespace after import.")
-
             all_transforms = cmds.ls(type="transform", long=True)
-            print(f"All transforms in scene: {all_transforms}")
+            print(f"All transforms after import: {all_transforms}")
+            imported_items = [t for t in all_transforms if import_namespace in t or "pCube" in t]  # Broaden search
+            print(f"Fallback search found transforms: {imported_items}")
+        
+        if not imported_items:
+            self.set_feedback(f"Error: No transforms found after import.")
+            print(f"No transforms found in scene after import.")
             return
-        print(f"Imported transforms: {imported_items}")
 
         # Transfer UVs
         for orig_item in source_objects:
-            orig_leaf = orig_item.split('|')[-1] 
+            orig_leaf = orig_item.split('|')[-1].split(':')[-1]
             print(f"Processing original: {orig_item}, leaf name: {orig_leaf}")
             matched_import = None
             for imp_item in imported_items:
-                imp_leaf = imp_item.split('|')[-1] 
-                imp_name = imp_leaf.split(':')[-1] 
-                if imp_name == orig_leaf:
+                imp_leaf = imp_item.split('|')[-1].split(':')[-1]
+                if imp_leaf == orig_leaf or orig_leaf in imp_leaf:
                     matched_import = imp_item
                     break
             if matched_import:
                 print(f"Found match: {matched_import}")
-                source_shapes = cmds.listRelatives(matched_import, shapes=True, fullPath=True, noIntermediate=True)
-                target_shapes = cmds.listRelatives(orig_item, shapes=True, fullPath=True, noIntermediate=True)
+                source_shapes = cmds.listRelatives(matched_import, shapes=True, fullPath=True, noIntermediate=True) or []
+                target_shapes = cmds.listRelatives(orig_item, shapes=True, fullPath=True, noIntermediate=True) or []
                 if not source_shapes or not target_shapes:
                     self.set_feedback(f"Error: Could not find shapes for {matched_import} or {orig_item}")
                     print(f"Source shapes: {source_shapes}, Target shapes: {target_shapes}")
@@ -463,7 +470,7 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
                             self.set_feedback(f"Error transferring UVs for {orig_leaf}")
                 else:
                     if target_uv_layer not in src_uv_layers:
-                        self.set_feedback(f"Error: Selected UV set '{target_uv_layer}' not found in imported data.")
+                        self.set_feedback(f"Error: UV set '{target_uv_layer}' not found in imported data.")
                         print(f"UV set {target_uv_layer} not in source: {src_uv_layers}")
                         continue
                     if target_uv_layer not in trg_uv_layers:
@@ -497,10 +504,10 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
                 trg_uv_layers_after = cmds.polyUVSet(trg, query=True, allUVSets=True) or []
                 print(f"Target UV sets after: {trg_uv_layers_after}")
             else:
-                self.set_feedback(f"Error: No corresponding imported object for {orig_item}")
+                self.set_feedback(f"Warning: No corresponding imported object for {orig_item}")
                 print(f"No match found for {orig_item} in imported items.")
         
-        # Cleanup imported 
+        # Cleanup
         for item in imported_items:
             try:
                 cmds.delete(item)
@@ -511,6 +518,7 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
         # Namespace cleanup
         if cmds.namespace(exists=import_namespace):
             try:
+                cmds.namespace(setNamespace=':')
                 cmds.namespace(removeNamespace=import_namespace, mergeNamespaceWithRoot=True)
                 print(f"Removed namespace '{import_namespace}'")
             except Exception as e:
@@ -520,7 +528,6 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
         self.set_feedback(f"UVs imported to {target_uv_layer}")
         print("UV import process completed.")
 
-    # ---------------------------------- Post-Process Functions ----------------------------------
     def adjust_angle(self):
         self.edge_angle_threshold = self.angle_adjuster.value()
         print(f"Soften tolerance angle set to {self.edge_angle_threshold}")
@@ -547,7 +554,7 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
                 cmds.polySoftEdge(uv_border_edges, angle=0, constructionHistory=False)
             
             if self.use_angle_tolerance:
-                cmds.polySelectConstraint(mode=2, type=0x0008, smoothness=1, angle=True, anglebound=[0, 54])
+                cmds.polySelectConstraint(mode=2, type=0x0008, smoothness=1, angle=True, anglebound=[0, self.edge_angle_threshold])
                 cmds.polySoftEdge(angle=self.edge_angle_threshold, constructionHistory=False)
                 cmds.polySelectConstraint(mode=0)
             
@@ -556,9 +563,8 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
         
         self.set_feedback("Normals softened, UV border edges hardened" if not self.use_angle_tolerance else 
                           "Normals softened, UV border edges below tolerance hardened")
-        print(self.set_feedback.__self__.feedback_label.text())
+        print(self.feedback_label.text())
 
-# ---------------------------------- Launcher ---------------------------------------
 def fetch_maya_root():
     ptr = omui.MQtUtil.mainWindow()
     return wrapInstance(int(ptr), QtWidgets.QWidget)
