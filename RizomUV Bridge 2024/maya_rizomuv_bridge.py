@@ -3,9 +3,8 @@ import maya.cmds as cmds
 import maya.mel as mel
 import maya.OpenMayaUI as omui
 from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
-import subprocess, tempfile, os, platform
+import subprocess, tempfile, os, platform, sys, locale
 import xml.dom.minidom as xml
-import sys
 
 if sys.version_info.major >= 3 and sys.version_info.minor >= 11:  
     from PySide6 import QtWidgets, QtCore, QtGui
@@ -21,6 +20,24 @@ PATH_DEFAULTS = {
 }
 
 logo_encoded = "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"  # Placeholder for encoded logo data
+
+# ---------------------------------- Subprocess Decoding Helper ----------------------------------
+def safe_decode_subprocess(command):
+    encodings_to_try = [
+        locale.getpreferredencoding(False),
+        'utf-8',
+        'cp866',     # Russian Windows consoles
+        'cp1251',    # Other Cyrillic fallback
+        'latin1'     # Very lenient fallback
+    ]
+    for enc in encodings_to_try:
+        try:
+            output = subprocess.check_output(command, stderr=subprocess.STDOUT).decode(enc, errors='replace')
+            return output
+        except (UnicodeDecodeError, subprocess.SubprocessError):
+            continue
+    # Return empty string if all decodings fail
+    return ""
 
 # ---------------------------------- Configuration Manager ----------------------------------
 class ConfigManager:
@@ -293,24 +310,24 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
         system = platform.system()
         if system == "Windows":
             try:
-                tasks = subprocess.check_output(['tasklist'], stderr=subprocess.STDOUT).decode().lower()
+                tasks = safe_decode_subprocess(['tasklist']).lower()
                 if 'rizomuv.exe' in tasks:
                     rizom_active = True
-            except subprocess.CalledProcessError as e:
+            except Exception as e:
                 print(f"Failed to check running processes: {e}")
         elif system == "Darwin":  # macOS
             try:
-                tasks = subprocess.check_output(['pgrep', '-f', 'RizomUV'], stderr=subprocess.STDOUT).decode().lower()
+                tasks = safe_decode_subprocess(['pgrep', '-f', 'RizomUV']).lower()
                 if 'rizomuv' in tasks:
                     rizom_active = True
-            except subprocess.CalledProcessError as e:
+            except Exception as e:
                 print(f"Error checking if RizomUV is running: {e}")
         else:
             try:
-                tasks = subprocess.check_output(['ps', 'aux'], stderr=subprocess.STDOUT).decode().lower()
+                tasks = safe_decode_subprocess(['ps', 'aux']).lower()
                 if 'rizomuv' in tasks:
                     rizom_active = True
-            except subprocess.CalledProcessError as e:
+            except Exception as e:
                 print(f"Error checking if RizomUV is running: {e}")
         
         if not rizom_active:
@@ -319,7 +336,7 @@ ZomSave({{File={{Path="{target_file}", UVWProps=true}}, __UpdateUIObjFileName=tr
                 if system == "Windows":
                     cmd = f'"{self.config.rizom_location}" -cfi "{self.config.lua_control_file}"'
                     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                elif system == "Darwin":  # macOS - Use 'open -a' as in your working script
+                elif system == "Darwin":  # macOS
                     cmd = ['open', '-a', self.config.rizom_location, '--args', '-cfi', self.config.lua_control_file]
                     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 else:
