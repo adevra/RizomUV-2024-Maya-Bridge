@@ -7,20 +7,23 @@ import sys
 import logging
 import glob
 import subprocess
+import locale
+
 try:
-    if sys.version_info.major >= 3 and sys.version_info.minor >= 11: 
+    if sys.version_info.major >= 3 and sys.version_info.minor >= 11:
         from PySide6 import QtWidgets, QtCore, QtGui
         logging.info("Using PySide6 for installer dialogs")
-    else: 
+    else:
         from PySide2 import QtWidgets, QtCore, QtGui
         logging.info("Using PySide2 for installer dialogs")
     QT_AVAILABLE = True
 except ImportError as e:
      QT_AVAILABLE = False
      logging.error(f"Could not import PySide2 or PySide6: {e}. Auto-detection selection UI unavailable.")
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 def get_maya_main_window():
-    """Gets the Maya main window QWidget if Qt is available."""
     if not QT_AVAILABLE:
         return None
     try:
@@ -35,8 +38,8 @@ def get_maya_main_window():
     except Exception as e:
         logging.error(f"Could not get Maya main window: {e}")
     return None
+
 def run_command(cmd_list):
-    """Runs a command and returns stdout, stderr, returncode."""
     try:
         startupinfo = None
         if platform.system() == "Windows":
@@ -47,10 +50,10 @@ def run_command(cmd_list):
             cmd_list,
             capture_output=True,
             text=True,
-            check=False, 
-            startupinfo=startupinfo, 
-            encoding=locale.getpreferredencoding(False), 
-            errors='replace' 
+            check=False,
+            startupinfo=startupinfo,
+            encoding=locale.getpreferredencoding(False),
+            errors='replace'
         )
         return process.stdout, process.stderr, process.returncode
     except FileNotFoundError:
@@ -59,10 +62,10 @@ def run_command(cmd_list):
     except Exception as e:
         logging.error(f"Error running command '{' '.join(cmd_list)}': {e}")
         return "", str(e), -1
+
 def find_rizomuv_installations():
-    """Attempts to find RizomUV installations on the system."""
     system = platform.system()
-    found_paths = set() 
+    found_paths = set()
     logging.info("Attempting to detect RizomUV installations...")
     if system == "Windows":
         program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
@@ -80,7 +83,7 @@ def find_rizomuv_installations():
                     found_paths.add(os.path.normpath(path))
                     logging.info(f"Found potential Windows path: {path}")
     elif system == "Darwin":
-        bundle_id = "com.rizom-lab.rizomuv" 
+        bundle_id = "com.rizom-lab.rizomuv"
         cmd = ['mdfind', f'kMDItemCFBundleIdentifier == "{bundle_id}"']
         stdout, stderr, code = run_command(cmd)
         if code == 0 and stdout:
@@ -95,7 +98,7 @@ def find_rizomuv_installations():
         ]
         for pattern in search_patterns:
              for path in glob.glob(pattern):
-                  if os.path.isdir(path): 
+                  if os.path.isdir(path):
                       found_paths.add(os.path.normpath(path))
                       logging.info(f"Found potential macOS path: {path}")
     elif system == "Linux":
@@ -107,11 +110,11 @@ def find_rizomuv_installations():
                 logging.info(f"Found via which: {path}")
         search_patterns = [
             "/usr/local/bin/rizomuv",
-            "/opt/Rizom Lab/RizomUV*/rizomuv", 
+            "/opt/Rizom Lab/RizomUV*/rizomuv",
             os.path.expanduser("~/.local/bin/rizomuv"),
             "/opt/RizomUV*.AppImage",
             "/usr/local/bin/RizomUV*.AppImage",
-            os.path.expanduser("~/Applications/RizomUV*.AppImage"), 
+            os.path.expanduser("~/Applications/RizomUV*.AppImage"),
             os.path.expanduser("~/.local/bin/RizomUV*.AppImage"),
         ]
         for pattern in search_patterns:
@@ -120,9 +123,9 @@ def find_rizomuv_installations():
                        found_paths.add(os.path.normpath(path))
                        logging.info(f"Found potential Linux path: {path}")
     logging.info(f"Detection finished. Found {len(found_paths)} potential installations.")
-    return sorted(list(found_paths)) 
+    return sorted(list(found_paths))
+
 def browse_manually(parent_window):
-    """Opens a file dialog for manual selection."""
     system = platform.system()
     file_filter = ""
     default_path_dir = ""
@@ -143,7 +146,7 @@ def browse_manually(parent_window):
         path_tuple = QtWidgets.QFileDialog.getOpenFileName(parent_window, "Select RizomUV Application (.app)", default_path_dir, "Applications (*.app)")
         if path_tuple and path_tuple[0]:
              selected_path = path_tuple[0]
-    else: 
+    else:
         file_filter = "RizomUV Executable or AppImage"
         default_path = "/usr/local/bin/rizomuv"
         default_path_dir = os.path.dirname(default_path) if os.path.exists(default_path) else "/"
@@ -157,8 +160,8 @@ def browse_manually(parent_window):
     else:
          logging.info("Manual browse cancelled.")
          return None
+
 class SelectRizomDialog(QtWidgets.QDialog):
-    """Custom dialog to select from multiple detected RizomUV paths."""
     def __init__(self, paths, parent=None):
         super(SelectRizomDialog, self).__init__(parent)
         self.setWindowTitle("Select RizomUV Version")
@@ -171,7 +174,7 @@ class SelectRizomDialog(QtWidgets.QDialog):
         self.list_widget = QtWidgets.QListWidget()
         self.list_widget.addItems(paths)
         if paths:
-            self.list_widget.setCurrentRow(0) 
+            self.list_widget.setCurrentRow(0)
         layout.addWidget(self.list_widget)
         button_layout = QtWidgets.QHBoxLayout()
         self.ok_button = QtWidgets.QPushButton("Use Selected")
@@ -186,30 +189,33 @@ class SelectRizomDialog(QtWidgets.QDialog):
         self.browse_button.clicked.connect(self.browse_selection)
         self.cancel_button.clicked.connect(self.reject)
         self.list_widget.itemDoubleClicked.connect(self.accept_selection)
+
     def accept_selection(self):
         current_item = self.list_widget.currentItem()
         if current_item:
             self.selected_path = current_item.text()
-            self.accept() 
+            self.accept()
         else:
              logging.warning("OK clicked but no item selected in dialog.")
+
     def browse_selection(self):
         self.do_browse = True
-        self.reject() 
+        self.reject()
+
     @staticmethod
     def get_selection(paths, parent):
-        """Static method to show the dialog and get the result."""
         dialog = SelectRizomDialog(paths, parent)
-        result = dialog.exec_() 
+        result = dialog.exec_()
         if result == QtWidgets.QDialog.Accepted:
-            return dialog.selected_path, False 
+            return dialog.selected_path, False
         elif dialog.do_browse:
-            return None, True 
-        else: 
-            return None, False 
+            return None, True
+        else:
+            return None, False
+
 def onMayaDroppedPythonFile(*args):
     system = platform.system()
-    rizomPath = None 
+    rizomPath = None
     try:
         logging.info("Starting RizomUV Bridge installer...")
         installer_directory = os.path.dirname(__file__)
@@ -239,7 +245,7 @@ def onMayaDroppedPythonFile(*args):
                  message=f"Detected RizomUV at:\n\n{detected_paths[0]}\n\nUse this path?",
                  button=["Use this Path", "Browse Manually..."],
                  defaultButton="Use this Path",
-                 cancelButton="Browse Manually...", 
+                 cancelButton="Browse Manually...",
                  dismissString="Browse Manually..."
              )
              if result == "Use this Path":
@@ -248,7 +254,7 @@ def onMayaDroppedPythonFile(*args):
                  rizomPath = browse_manually(maya_window)
                  if not rizomPath:
                      raise RuntimeError("Manual selection cancelled or failed.")
-        else: 
+        else:
              if not QT_AVAILABLE:
                   logging.error("Multiple RizomUV versions detected, but Qt unavailable to show selection dialog.")
                   cmds.confirmDialog(
@@ -256,7 +262,7 @@ def onMayaDroppedPythonFile(*args):
                       message="Multiple RizomUV versions detected, but the selection dialog cannot be shown.\nPlease browse manually.",
                       button=["OK"], defaultButton="OK"
                   )
-                  rizomPath = browse_manually(None) 
+                  rizomPath = browse_manually(None)
                   if not rizomPath:
                       raise RuntimeError("Manual selection cancelled or failed.")
              else:
@@ -268,7 +274,7 @@ def onMayaDroppedPythonFile(*args):
                            raise RuntimeError("Manual selection cancelled or failed.")
                   elif selected_path_from_dialog:
                       rizomPath = selected_path_from_dialog
-                  else: 
+                  else:
                        raise RuntimeError("RizomUV selection cancelled.")
         if not rizomPath:
              raise RuntimeError("Failed to determine RizomUV path.")
@@ -339,6 +345,7 @@ def onMayaDroppedPythonFile(*args):
              except Exception:
                   continue
         if not button_exists:
+            shelf_command = "import importlib; import maya_rizomuv_bridge; importlib.reload(maya_rizomuv_bridge); maya_rizomuv_bridge.launch_tool()"
             cmds.shelfButton(
                 enableCommandRepeat=True, enable=True, width=35, height=34,
                 manage=True, visible=True, preventOverride=False,
@@ -346,7 +353,7 @@ def onMayaDroppedPythonFile(*args):
                 enableBackground=False, align="center",
                 image=absolute_shelf_icon_path, image1=absolute_shelf_icon_path,
                 style="iconOnly", marginWidth=1, marginHeight=1,
-                command="import maya_rizomuv_bridge; reload(maya_rizomuv_bridge); maya_rizomuv_bridge.launch_tool()"
+                command=shelf_command
             )
             logging.info("Shelf button created successfully.")
         cmds.confirmDialog(
@@ -370,5 +377,6 @@ def onMayaDroppedPythonFile(*args):
     except Exception as e:
         cmds.confirmDialog(message=f"Unexpected error during installation:\n{e}", icon="critical", title="ERROR")
         logging.exception("Unexpected installation error:")
+
 if __name__ == "__main__":
     pass
