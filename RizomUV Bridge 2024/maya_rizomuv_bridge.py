@@ -51,45 +51,43 @@ CONFIG_DIR_NAME = "RizomUVBridge"
 CONFIG_FILE_NAME = "settings.json"
 LUA_SCRIPT_FILE_NAME = "rizomuv_control_script.lua"
 FBX_FILE_NAME = "RizomUVMayaBridge.fbx"
+BRIDGE_ASCII_ART = r"""                                                                            
+ +++++-+-------++---------++---------.  .---+-+++-+++--+-+++---+---+------++ 
+ +---+-----+++----+++-+++---++---+-+--##-     .----+---------+++-++------+++ 
+ +--+---++-----+++--+---++++------+-..########   -+--+----+-------++++----+- 
+ -+---++----++++--++-.     ----------.######## ## .-+++---+++++---++-+--+++- 
+ +---++--++++---+-----####+   ------. ######## ###  --++++--+-+-+-------+++- 
+ ----+---++--------+- ######## +++----######## ####. --+-+--+-+-+------+---- 
+ -++---+++---+--++--- ######## ---+--   .##### #####- -----+--+-----+-+--+-- 
+ ---+-++---+---+--++-. ####### -----+---      ########.+++--+++------+-++--- 
+ -++++---++----+++---- #######+.++-++-++----+ #######-.--++----+-++---+++-++ 
+ +++----+----+--++++++ ######## ----++-++---- ####### --------------++++---- 
+ +----++--+-----+++-+- +####### --++--+--+--..####### --+-+--+------+----+++ 
+ ----+-++-------------- ####### ----+---+--- ######## --+++--++------------+ 
+ ----+--------+++---+-- #######              #######+ ++--++--++------------ 
+ --+--------+----------. ################### ####### -------+-+------------- 
+ ---------+---+---+-----.  ##### ########### ####.  --------+-+---+--------- 
+ -+----++-------+-------+-.  -## ###########-##   --+-----+-+++++---+------- 
+ -+---+------+++-------+---+-  .+##########-+  .--------+-------++++---+---- 
+ ----------+------------------.             .------++-.--++----..-------.--- 
+ -+-..     .- .. ..   .   ..  ###  .-.-. .+--. -.--+-.#-.++.-# +# .-+- +#.-- 
+ -+-.######-. ##.+####+### .##..###.  ### .- .##.-++-+## ++ ## ### -- ###.-- 
+ --- #-    #  ##      ##   ## ..   ## ####  ###. --+.-## -+ ##  ##-  -## --- 
+ --- #######  ## -. ### ..##- -++. ## ## ####-.# --+--## -- ## - ##- ## .+-- 
+ --.+#   ##   ##  -##      ##     ### ##  ##. ## ---- ##   -## -. ## # .-+-- 
+ --.##+.  ##. ##.-########  ######.   ## .  . ##.----. #####  .--. ##+ ---+- 
+                                                                                                                   
+> RizomUV - Maya Bridge v2.3.0
+     >    https://www.rizomuv.com/virtual-spaces/#bridges   
+     >    https://github.com/adevra/RizomUV-2024-Maya-Bridge
+                                                                                              
+"""
+                                                                                                   
 PATH_DEFAULTS = {
     "Windows": "C:\\Program Files\\Rizom Lab\\RizomUV 2024.0\\rizomuv.exe",
     "Darwin": "/Applications/RizomUV 2024.1.app",
     "Linux": "/usr/local/bin/rizomuv",
 }
-BRIDGE_ASCII_ART = r"""                                                                                                   
-                                                 +++++++                                           
-                                                 ++++++++++++++                                    
-                                                 +++++++++++++++ +                                 
-                                                 +++++++++++++++ ++                                
-                        ++                       ++++++++++++++ +++++                              
-                        ++++++++++               ++++++++++++++ ++++++                             
-                        ++++++++++++             ++++++++++++++ +++++++                            
-                        ++++++++++++              +++++++++++++ ++++++++                           
-                        +++++++++++++                    ++++++ ++++++++++                         
-                         ++++++++++++                           +++++++++++                        
-                         ++++++++++++                          ++++++++++++                        
-                         ++++++++++++                          ++++++++++++                        
-                          ++++++++++++                         ++++++++++++                        
-                          ++++++++++++                         ++++++++++++                        
-                          ++++++++++++                        ++++++++++++                         
-                          +++++++++++++                       ++++++++++++                         
-                           ++++++++++++                       ++++++++++++                         
-                           ++++++++++++                       ++++++++++++                         
-                           ++++++++++++                       +++++++++++                          
-                            +++++++++++  +++++++++++++++++++  +++++++++++                          
-                               +++++++++ +++++++++++++++++++ +++++++++                             
-                                 +++++++ +++++++++++++++++++ +++++++                               
-                                   +++++  ++++++++++++++++++ +++++                                 
-                                     ++++ +++++++++++++++++  +++                                   
-                                       ++ +++++++++++++++++ ++                                     
-               ++++++    ++ ++++++++   +++++     ++      ++     +++    ++ +++     ++               
-               +++  +++  ++      +++  ++    +++  +++    +++     +++    ++  ++    +++               
-               ++    ++  ++     +++  +++      ++ +++++ ++ +     +++    +++  ++  +++                
-               +++++++   ++   +++    +++      ++ ++ ++++ ++     +++    ++   ++++++                 
-               ++   +++  ++  +++++++  +++   +++  ++  ++  ++      ++  ++++    ++++                  
-               ++    ++  ++  ++++++++   ++++     ++      ++        +++        ++                   
-                                                                                                   """
-
 
 def setup_logging(level=logging.ERROR):
     if not logger.handlers:
@@ -114,7 +112,7 @@ def setup_logging(level=logging.ERROR):
             )
 
 
-setup_logging(level=logging.INFO)
+setup_logging(level=logging.ERROR)
 
 
 class ConfigManager:
@@ -132,6 +130,7 @@ class ConfigManager:
         self.include_uvs = True
         self.pack_quality = 2
         self.pack_iterations = 256
+        self.log_level_str = "ERROR"
         logger.debug("Set initial default configuration attributes.")
 
     def _get_base_directory(self):
@@ -176,6 +175,12 @@ class ConfigManager:
                 self.pack_iterations = config_data.get(
                     "mutations", self.pack_iterations
                 )
+                loaded_log_level_str = config_data.get("logLevel", "ERROR").upper()
+                if loaded_log_level_str in ["INFO", "DEBUG", "WARNING", "ERROR", "CRITICAL"]:
+                    self.log_level_str = loaded_log_level_str
+                else:
+                    logger.warning(f"Invalid log level '{loaded_log_level_str}' found in config. Defaulting to ERROR.")
+                    self.log_level_str = "ERROR"
                 logger.info(f"Loaded configuration from {self.config_file_path}")
                 if not Path(self.rizom_location).exists() and not (
                     platform.system() == "Darwin"
@@ -231,6 +236,7 @@ class ConfigManager:
             "loadUVs": self.include_uvs,
             "quality": self.pack_quality,
             "mutations": self.pack_iterations,
+            "logLevel": self.log_level_str,
         }
         try:
             self.ensure_storage_exists()
@@ -279,6 +285,9 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         self.edge_angle_threshold = 45.1
         self.use_angle_tolerance = True
         self.setObjectName("rizomUVBridgePanelInstance")
+        initial_log_level = getattr(logging, self.config.log_level_str, logging.ERROR)
+        logger.info(f"Setting initial log level from config: {self.config.log_level_str} ({logging.getLevelName(initial_log_level)})")
+        setup_logging(level=initial_log_level)
         self.build_interface()
         self.setup_handlers()
         self.refresh_uv_options()
@@ -340,7 +349,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         self.custom_lua_label = QtWidgets.QLabel("Custom Lua Script (Optional):")
         self.custom_lua_input = QtWidgets.QTextEdit()
         self.custom_lua_input.setPlaceholderText(
-            "# Enter custom Lua commands here.\n# They run AFTER loading and potentially AFTER setting the UV set,\n# but BEFORE the Auto Pack step (if Auto Pack is used later)."
+            "# Enter custom Lua commands here.\n# They run AFTER loading and AFTER setting the UV set,\n# but BEFORE the Auto Pack step (if Auto Pack is used later)."
         )
         self.custom_lua_input.setAcceptRichText(False)
         self.custom_lua_input.setMinimumHeight(60)
@@ -386,14 +395,14 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         post_layout = QtWidgets.QVBoxLayout()
         self.edge_hardener_btn = QtWidgets.QPushButton("Harden UV Shell Edges")
         self.edge_hardener_btn.setToolTip(
-            "Process selected meshes in Maya:\n1. Soften all edges.\n2. Harden edges that lie on UV shell borders.\n3. (Optional) Soften remaining edges based on angle tolerance."
+            "Process selected meshes in Maya:\n1. Soften all edges.\n2. Harden UV shell border edges.\n3. (Optional) Soften remaining edges based on angle tolerance."
         )
         post_layout.addWidget(self.edge_hardener_btn)
         self.tolerance_toggle = QtWidgets.QCheckBox(
             "Use Angle Tolerance After Hardening"
         )
         self.tolerance_toggle.setToolTip(
-            "If checked, after hardening UV borders, apply softening\nto the rest of the mesh using the angle below."
+            "If checked, after hardening UV borders, apply softenig\nto the rest of the mesh using the angle below."
         )
         post_layout.addWidget(self.tolerance_toggle)
         angle_layout = QtWidgets.QHBoxLayout()
@@ -425,7 +434,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         bottom_layout.addSpacerItem(spacer)
         self.debug_toggle_btn = QtWidgets.QPushButton()
         self.debug_toggle_btn.setToolTip(
-            "Toggle logging level between INFO (verbose) and ERROR (minimal)."
+            "Toggle logging level between DEBUG (verbose) and Production (minimal)."
         )
         self.debug_toggle_btn.setCheckable(True)
         self.debug_toggle_btn.setSizePolicy(
@@ -489,9 +498,9 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             )
 
     def _update_debug_button_text(self):
-        is_info_level = logger.level <= logging.INFO
+        is_info_level = self.config.log_level_str == "INFO"
         self.debug_toggle_btn.setChecked(is_info_level)
-        self.debug_toggle_btn.setText("🐞 INFO" if is_info_level else "⚡️ ERROR")
+        self.debug_toggle_btn.setText("🐞 DEBUG" if is_info_level else "⚡️")
         self.debug_toggle_btn.adjustSize()
 
     def toggle_debug_logging(self, checked):
@@ -502,6 +511,13 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         else:
             logger.info(f"Switching logging level to {level_name}")
         setup_logging(level=new_level)
+        self.config.log_level_str = level_name
+        if not self.config.save_config():
+            self.set_feedback("Error saving logging preference.", level="error")
+            logging.getLogger("RizomBridge").error("Failed to save logging level preference to config.")
+        else:
+            logging.getLogger("RizomBridge").debug(f"Saved logging level preference: {level_name}")
+        
         self._update_debug_button_text()
 
     def dispatch_manual_send(self):
@@ -1713,7 +1729,7 @@ def launch_tool():
     global config
     intended_workspace_control_name = "rizomUVBridgeWorkspaceControl"
     panel_object_name = "rizomUVBridgePanelInstance"
-    window_title = "RizomUV Bridge"
+    window_title = "RizomUV <> Maya Bridge v2.3.0"
     logger.info(f"Launching {window_title} Tool (Manual)...")
     if cmds.workspaceControl(intended_workspace_control_name, q=True, exists=True):
         logger.warning(
@@ -1753,7 +1769,12 @@ def launch_tool():
     module_path_for_script = (
         f"{INSTALL_SUBDIR}.{MODULE_NAME}" if INSTALL_SUBDIR else MODULE_NAME
     )
-    ui_script_for_control = f"import importlib; import {module_path_for_script}; if hasattr({module_path_for_script}, '_setup_panel_content_deferred'):     {module_path_for_script}._setup_panel_content_deferred();else: print('ERROR: {module_path_for_script}._setup_panel_content_deferred not found!')"
+
+    ui_script_lines = [
+        f"import {module_path_for_script}",
+        f"{module_path_for_script}._setup_panel_content_deferred()"
+    ]
+    ui_script_for_control = "; ".join(line.strip() for line in ui_script_lines)
     logger.info(f"Generated uiScript for control: {ui_script_for_control}")
     try:
         logger.info(f"Creating workspace control: {intended_workspace_control_name}")
