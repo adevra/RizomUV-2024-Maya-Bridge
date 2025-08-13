@@ -1237,8 +1237,65 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             self.feedback_label.setStyleSheet("")
         self.feedback_label.setText(message)
 
+    def _send_save_command_to_rizom(self):
+        """Sends a Lua save command to RizomUV to update the bridge FBX."""
+        rizom_path_str = str(self.config.rizom_location)
+        lua_script_path_str = self.config.get_lua_script_path_str()
+        lua_fbx_path = str(self.config.fbx_export_file_path).replace("\\", "/")
+        lua_script = "\n".join(
+            [
+                "-- Maya Bridge Auto-Save --",
+                f'ZomSave({{File={{Path="{lua_fbx_path}", UVWProps=true}}, __UpdateUIObjFileName=true}})',
+            ]
+        )
+        try:
+            Path(lua_script_path_str).parent.mkdir(parents=True, exist_ok=True)
+            with open(lua_script_path_str, "w", encoding="utf-8") as f:
+                f.write(lua_script)
+            logger.info(f"Generated save Lua script: {lua_script_path_str}")
+        except IOError as e:
+            logger.error(f"Failed to write save Lua script: {e}")
+            return False
+        system = platform.system()
+        lua_arg = "-cfi"
+        cmd = []
+        try:
+            if system == "Windows":
+                cmd = [rizom_path_str, lua_arg, lua_script_path_str]
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    text=True,
+                    encoding=locale.getpreferredencoding(False),
+                )
+            elif system == "Darwin":
+                cmd = ["open", "-a", rizom_path_str, "--args", lua_arg, lua_script_path_str]
+                process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            else:
+                cmd = [rizom_path_str, lua_arg, lua_script_path_str]
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding=locale.getpreferredencoding(False),
+                )
+            logger.info("Executing: %s", " ".join(f'\"{c}\"' for c in cmd))
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.info("RizomUV save command sent (timeout expired).")
+            return True
+        except Exception as e:
+            logger.error("Failed to execute RizomUV save command: %s", e, exc_info=True)
+            return False
+
     def fetch_from_rizom(self):
         "Imports UVs from the bridge FBX file back into Maya selection.\n        NOTE: This version uses polyTransfer and likely transfers ALL matching UV sets."
+        self.set_feedback("Requesting save from RizomUV...", level="info")
+        self._send_save_command_to_rizom()
         self.set_feedback("Attempting to import UVs from Rizom...", level="info")
         cmds.refresh()
         target_objects = cmds.ls(selection=True, long=True, type="transform")
