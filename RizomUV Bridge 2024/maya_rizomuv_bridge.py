@@ -9,6 +9,7 @@ import platform
 import sys
 import logging
 import json
+import re as _re
 import shutil
 import threading
 from pathlib import Path
@@ -79,7 +80,7 @@ BRIDGE_ASCII_ART = r"""
  --.+#   ##   ##  -##      ##     ### ##  ##. ## ---- ##   -## -. ## # .-+-- 
  --.##+.  ##. ##.-########  ######.   ## .  . ##.----. #####  .--. ##+ ---+- 
                                                                                                                    
-> RizomUV - Maya Bridge v3.1.3
+> RizomUV - Maya Bridge v3.3.0
      >    https://www.rizomuv.com/virtual-spaces/#bridges   
      >    https://github.com/adevra/RizomUV-2024-Maya-Bridge
                                                                                               
@@ -167,6 +168,7 @@ class ConfigManager:
         self.use_live_link = platform.system() == "Windows"
         self.pack_presets = {}
         self.active_pack_preset = ""
+        self.auto_sync_groups = False
         logger.debug("Set initial default configuration attributes.")
 
     def _get_base_directory(self):
@@ -221,6 +223,7 @@ class ConfigManager:
                         for name, value in raw_presets.items()
                     }
                 self.active_pack_preset = str(config_data.get("activePackPreset", ""))
+                self.auto_sync_groups = bool(config_data.get("autoSyncGroups", False))
                 loaded_log_level_str = config_data.get("logLevel", "ERROR").upper()
                 if loaded_log_level_str in ["INFO", "DEBUG", "WARNING", "ERROR", "CRITICAL"]:
                     self.log_level_str = loaded_log_level_str
@@ -290,6 +293,7 @@ class ConfigManager:
             "useLiveLink": self.use_live_link,
             "packPresets": self.pack_presets,
             "activePackPreset": self.active_pack_preset,
+            "autoSyncGroups": self.auto_sync_groups,
         }
         try:
             self.ensure_storage_exists()
@@ -506,6 +510,170 @@ def build_auto_unwrap_sequence(algorithm, value, iterations):
     ]
 
 
+def maya_safe_set_name(prefix, name):
+    """Sanitizes a Rizom group/tag name into a legal Maya node name."""
+    safe = _re.sub(r"[^A-Za-z0-9_]", "_", str(name))
+    if safe and safe[0].isdigit():
+        safe = "_" + safe
+    return prefix + safe
+
+
+def tile_name_to_udim(name):
+    """'Tile_<col>_<row>' -> UDIM number, else None."""
+    m = _re.fullmatch(r"Tile_(\d+)_(\d+)", str(name))
+    if not m:
+        return None
+    col, row = int(m.group(1)), int(m.group(2))
+    return 1001 + col + 10 * row
+
+
+def map_scene_polys_to_objects(sent_face_counts):
+    """[[longName, faceCount], ...] (export order) -> [(name, start, end), ...]."""
+    ranges = []
+    cursor = 0
+    for entry in sent_face_counts or []:
+        name, count = entry[0], int(entry[1])
+        ranges.append((name, cursor, cursor + count))
+        cursor += count
+    return ranges
+
+
+def build_reflection_sets(reflection, sent_face_counts):
+    """Maps Rizom groups/tags/tiles to per-object Maya face lists.
+
+    Returns {} when the recorded face counts do not cover the polygon table
+    (topology changed since Send — syncing would mis-assign faces).
+    """
+    poly_to_island = reflection.get("polyToIsland") or []
+    ranges = map_scene_polys_to_objects(sent_face_counts)
+    total = ranges[-1][2] if ranges else 0
+    if total != len(poly_to_island):
+        logger.error(
+            f"Reflection mismatch: {len(poly_to_island)} scene polys vs "
+            f"{total} recorded faces. Re-Send before syncing groups."
+        )
+        return {}
+    island_to_polys = {}
+    for poly_id, island_id in enumerate(poly_to_island):
+        island_to_polys.setdefault(island_id, []).append(poly_id)
+
+    def faces_for_islands(island_ids):
+        per_object = {}
+        for island_id in island_ids or []:
+            for poly_id in island_to_polys.get(island_id, []):
+                for name, start, end in ranges:
+                    if start <= poly_id < end:
+                        per_object.setdefault(name, []).append(poly_id - start)
+                        break
+        return {name: sorted(faces) for name, faces in per_object.items()}
+
+    sets = {}
+    for group_name, info in (reflection.get("groups") or {}).items():
+        if info.get("isTile"):
+            udim = tile_name_to_udim(group_name)
+            set_name = (
+                f"RZM_tile_{udim}" if udim
+                else maya_safe_set_name("RZM_tile_", group_name)
+            )
+        else:
+            set_name = maya_safe_set_name("RZM_grp_", group_name)
+        faces = faces_for_islands(info.get("islandIDs"))
+        if faces:
+            sets[set_name] = faces
+    for tag_name, island_ids in (reflection.get("tags") or {}).items():
+        faces = faces_for_islands(island_ids)
+        if faces:
+            sets[maya_safe_set_name("RZM_tag_", tag_name)] = faces
+    return sets
+
+
+import hashlib as _hashlib
+
+RIZOM_COLOR_SET = "rizomGroups"
+
+
+def group_color(name):
+    """Stable, well-distributed RGB (0-255) for a group name — same name always
+    maps to the same visually distinct color."""
+    h = _hashlib.md5(str(name).encode("utf-8")).digest()
+    hue = h[0] / 255.0
+    sat = 0.55 + (h[1] / 255.0) * 0.35
+    val = 0.65 + (h[2] / 255.0) * 0.30
+    i = int(hue * 6.0)
+    f = hue * 6.0 - i
+    p = val * (1.0 - sat)
+    q = val * (1.0 - f * sat)
+    t = val * (1.0 - (1.0 - f) * sat)
+    r, g, b = [
+        (val, t, p), (q, val, p), (p, val, t),
+        (p, q, val), (t, p, val), (val, p, q),
+    ][i % 6]
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+def _strip_rzm_prefix(set_name):
+    for pref in ("RZM_grp_", "RZM_tile_", "RZM_tag_"):
+        if set_name.startswith(pref):
+            return set_name[len(pref):]
+    return set_name
+
+
+def apply_group_colors(set_names):
+    """Colors each RZM_* set's faces by its stable group color, via a dedicated
+    'rizomGroups' color set, and turns on per-shape vertex-color display.
+
+    Maya-side, main thread. Returns the number of mesh shapes colored. Purely
+    sets mesh attributes — no scene-graph mutation, fully reversible via
+    clear_group_colors().
+    """
+    per_shape = {}
+    for set_name in set_names or []:
+        label = _strip_rzm_prefix(set_name)
+        rgb = tuple(c / 255.0 for c in group_color(label))
+        for comp in cmds.sets(set_name, query=True) or []:
+            node = comp.split(".")[0]
+            if not cmds.objExists(node):
+                continue
+            if cmds.nodeType(node) == "transform":
+                shapes = cmds.listRelatives(
+                    node, shapes=True, type="mesh", noIntermediate=True, fullPath=True
+                ) or []
+            else:
+                shapes = [node]
+            if not shapes:
+                continue
+            per_shape.setdefault(shapes[0], []).append((comp, rgb))
+    count = 0
+    for shape, items in per_shape.items():
+        try:
+            existing = cmds.polyColorSet(shape, query=True, allColorSets=True) or []
+            if RIZOM_COLOR_SET not in existing:
+                cmds.polyColorSet(
+                    shape, create=True, colorSet=RIZOM_COLOR_SET, representation="RGB"
+                )
+            cmds.polyColorSet(shape, currentColorSet=True, colorSet=RIZOM_COLOR_SET)
+            for comp, rgb in items:
+                cmds.polyColorPerVertex(comp, colorRGB=rgb)
+            cmds.setAttr(shape + ".displayColors", 1)
+            count += 1
+        except Exception as e_color:
+            logger.warning(f"Could not color group faces on {shape}: {e_color}")
+    return count
+
+
+def clear_group_colors():
+    """Removes the 'rizomGroups' color set from all meshes and turns off the
+    per-shape vertex-color display."""
+    for shape in cmds.ls(type="mesh", long=True) or []:
+        try:
+            sets_on_shape = cmds.polyColorSet(shape, query=True, allColorSets=True) or []
+            if RIZOM_COLOR_SET in sets_on_shape:
+                cmds.polyColorSet(shape, delete=True, colorSet=RIZOM_COLOR_SET)
+                cmds.setAttr(shape + ".displayColors", 0)
+        except Exception as e_clear:
+            logger.debug(f"Clear colors on {shape}: {e_clear}")
+
+
 config = None
 
 
@@ -524,6 +692,10 @@ def _ensure_config():
 _ensure_config()
 
 
+class _LaunchTimeout(Exception):
+    """RizomUV launched but never serviced the readiness query."""
+
+
 class RizomLinkManager:
     """Manages a persistent RizomUV instance driven through RizomUVLink (ZMQ).
 
@@ -532,7 +704,10 @@ class RizomLinkManager:
     the bridge falls back to the classic -cfi Lua workflow.
     """
 
-    READY_TIMEOUT_SEC = 60
+    # Per-launch readiness wait. Normally RizomUV answers in a few seconds;
+    # 30s tolerates a slow cold start while letting a hung launch (see
+    # ensure_running) fall through to a retry reasonably fast.
+    READY_TIMEOUT_SEC = 30
     DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
     PACK_TIMEOUT_MS = 60 * 60 * 1000
 
@@ -658,8 +833,17 @@ class RizomLinkManager:
                 "RizomUV is not running (nothing to get). Use 'Send' first."
             )
 
+    LAUNCH_ATTEMPTS = 3
+
     def ensure_running(self):
-        """Returns a connected link, launching RizomUV if needed. Raises on failure."""
+        """Returns a connected link, launching RizomUV if needed. Raises on failure.
+
+        RizomUV 2025.0.114 occasionally never services the readiness query after
+        launch (its ZMQ server comes up late/not at all — reproduced
+        intermittently). Because a timed-out REQ socket is permanently broken,
+        we can't re-poll the same instance; instead each attempt is a fresh
+        launch on a fresh port, killing the previous hung instance first.
+        """
         with self._lock:
             if self.is_connected():
                 return self._link
@@ -673,51 +857,75 @@ class RizomLinkManager:
             exe_path = str(self.config.rizom_location)
             if not Path(exe_path).is_file():
                 raise RuntimeError(f"RizomUV executable not found: {exe_path}")
-            link = module.CRizomUVLink()
-            port = None
-            for p in range(49152, 65534):
-                if not link.TCPPortIsOpen(p):
-                    port = p
-                    break
-            if port is None:
-                raise RuntimeError("No free TCP port found for RizomUV live link.")
-            # Dedicated live-link control file, always rewritten to a no-op so a
-            # fresh instance can never replay a stale script at startup. The
-            # classic workflow uses a separate file (LUA_SCRIPT_FILE_NAME).
-            lua_stub_path = str(self.config.live_lua_file_path)
-            try:
-                Path(lua_stub_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(lua_stub_path, "w", encoding="utf-8") as f:
-                    f.write("-- RizomUV Maya Bridge live-link control file --\n")
-            except OSError as e_stub:
-                logger.warning(f"Could not prepare Lua control file: {e_stub}")
-            cmd = [exe_path, "-cfi", lua_stub_path, "-id", str(port)]
-            logger.info(f"Launching RizomUV live link: {' '.join(cmd)}")
-            proc = subprocess.Popen(cmd, cwd=str(Path(exe_path).parent))
-            self._proc = proc
-            link.Connect(port)
-            # Single long-timeout call: ZMQ REQ sockets break permanently after
-            # a timed-out request, so polling with short timeouts is not an option.
-            try:
-                version = link.rizomuv.Execute(
-                    "Get", "Vars.Infos.Version.Full", self.READY_TIMEOUT_SEC * 1000
-                )
-            except Exception as e_wait:
+            last_error = None
+            for attempt in range(1, self.LAUNCH_ATTEMPTS + 1):
                 try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    f"RizomUV did not become ready within {self.READY_TIMEOUT_SEC}s "
-                    f"({e_wait}). Live Link needs a RizomUV version that supports "
-                    f"the -id flag; uncheck 'Use Live Link' to use the classic "
-                    f"workflow instead."
-                )
-            logger.info(f"RizomUV {version} ready on port {port}.")
-            self._link = link
-            self._port = port
-            self.config.save_state(livePort=port)
-            return self._link
+                    return self._launch_and_connect(module, exe_path, attempt)
+                except _LaunchTimeout as e_timeout:
+                    last_error = e_timeout
+                    logger.warning(
+                        f"RizomUV launch attempt {attempt}/{self.LAUNCH_ATTEMPTS} "
+                        f"did not become ready; retrying with a fresh instance."
+                    )
+            raise RuntimeError(
+                f"RizomUV failed to become ready after {self.LAUNCH_ATTEMPTS} "
+                f"launch attempts ({last_error}). It may be showing a dialog "
+                f"(license/crash-recovery) — check the RizomUV window, or "
+                f"uncheck 'Use Live Link' to use the classic workflow."
+            )
+
+    def _launch_and_connect(self, module, exe_path, attempt):
+        """One launch + readiness wait. Raises _LaunchTimeout on no-ready."""
+        link = module.CRizomUVLink()
+        port = None
+        for p in range(49152, 65534):
+            if not link.TCPPortIsOpen(p):
+                port = p
+                break
+        if port is None:
+            raise RuntimeError("No free TCP port found for RizomUV live link.")
+        # Dedicated live-link control file, always rewritten to a no-op so a
+        # fresh instance can never replay a stale script at startup. The
+        # classic workflow uses a separate file (LUA_SCRIPT_FILE_NAME).
+        lua_stub_path = str(self.config.live_lua_file_path)
+        try:
+            Path(lua_stub_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(lua_stub_path, "w", encoding="utf-8") as f:
+                f.write("-- RizomUV Maya Bridge live-link control file --\n")
+        except OSError as e_stub:
+            logger.warning(f"Could not prepare Lua control file: {e_stub}")
+        cmd = [exe_path, "-cfi", lua_stub_path, "-id", str(port)]
+        logger.info(f"Launching RizomUV live link (attempt {attempt}): {' '.join(cmd)}")
+        proc = subprocess.Popen(cmd, cwd=str(Path(exe_path).parent))
+        self._proc = proc
+        link.Connect(port)
+        try:
+            version = link.rizomuv.Execute(
+                "Get", "Vars.Infos.Version.Full", self.READY_TIMEOUT_SEC * 1000
+            )
+        except Exception as e_wait:
+            self._kill_process(proc)
+            self._proc = None
+            raise _LaunchTimeout(
+                f"no readiness within {self.READY_TIMEOUT_SEC}s ({e_wait})"
+            )
+        logger.info(f"RizomUV {version} ready on port {port}.")
+        self._link = link
+        self._port = port
+        self.config.save_state(livePort=port)
+        return self._link
+
+    @staticmethod
+    def _kill_process(proc):
+        """Force-kills a launched RizomUV; terminate() alone can leave it up on Windows."""
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
     def exec_task(self, task_name, params=None, timeout_ms=None):
         """Runs a link task with a long timeout; returns the raw result dict/value."""
@@ -759,6 +967,63 @@ class RizomLinkManager:
                 return False
         return False
 
+    def collect_reflection(self):
+        """Walks the connected RizomUV's group/tag trees + polygon table.
+
+        Worker-thread only (no cmds/Qt). Returns the reflection dict for
+        build_reflection_sets. Requires an existing connection.
+        """
+        self.require_connected()
+        out = self._link.rizomuv.Execute(
+            "Save", {"Data": True, "IndexTable.PolygonIDsToIslandIDs": True},
+            self.DEFAULT_TIMEOUT_MS,
+        )
+        if isinstance(out, dict) and out.get("Error"):
+            raise RuntimeError(f"Reflection Save failed: {out['Error']}")
+        poly_to_island = (out.get("IndexTable") or {}).get(
+            "PolygonIDsToIslandIDs"
+        ) or []
+        groups = {}
+
+        def walk_children(parent_path):
+            try:
+                names = self._link.rizomuv.Execute(
+                    "ItemNames", parent_path + ".Children", 30000
+                ) or []
+            except Exception:
+                return
+            for name in names:
+                child_path = f"{parent_path}.Children.{name}"
+                island_ids = []
+                try:
+                    island_ids = self._link.rizomuv.Execute(
+                        "Get", child_path + ".IslandIDs", 30000
+                    ) or []
+                except Exception:
+                    pass
+                groups[name] = {
+                    "islandIDs": list(island_ids),
+                    "isTile": tile_name_to_udim(name) is not None,
+                }
+                walk_children(child_path)
+
+        walk_children("Lib.Mesh.RootGroup")
+        tags = {}
+        try:
+            tag_names = self._link.rizomuv.Execute(
+                "ItemNames", "Lib.Mesh.Tags", 30000
+            ) or []
+            for tag in tag_names:
+                try:
+                    tags[tag] = list(self._link.rizomuv.Execute(
+                        "Get", f"Lib.Mesh.Tags.{tag}.IslandIDs", 30000
+                    ) or [])
+                except Exception:
+                    continue
+        except Exception:
+            logger.info("Tag tree not readable on this RizomUV; skipping tags.")
+        return {"polyToIsland": list(poly_to_island), "groups": groups, "tags": tags}
+
     def disconnect(self):
         self._link = None
         self._port = None
@@ -799,6 +1064,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         self.tab_widget = QtWidgets.QTabWidget()
         self.tab_widget.addTab(self._build_bridge_tab(), "Bridge")
         self.tab_widget.addTab(self._build_ops_tab(), "Rizom Ops")
+        self.tab_widget.addTab(self._build_integration_tab(), "Integration")
         main_layout.addWidget(self.tab_widget)
         self.feedback_label = QtWidgets.QLabel("Ready")
         self.feedback_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -1133,7 +1399,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
     def _update_ops_enabled(self):
         live = self._live_link_active()
         tooltip_off = "Requires Live Link (enable it in Settings; Windows only)."
-        for btn in (self.auto_unwrap_btn, self.unfold_btn, self.optimize_btn):
+        for btn in (self.auto_unwrap_btn, self.unfold_btn, self.optimize_btn, self.sync_groups_btn):
             btn.setEnabled(live and not self._busy)
             btn.setToolTip(self._ops_tooltips[btn] if live else tooltip_off)
 
@@ -1153,6 +1419,11 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         self.unwrap_algo_combo.currentIndexChanged.connect(self._sync_unwrap_param_widget)
         self.unfold_btn.clicked.connect(self.dispatch_unfold)
         self.optimize_btn.clicked.connect(self.dispatch_optimize)
+        self.sync_groups_btn.clicked.connect(self.dispatch_sync_groups)
+        self.sets_list.itemClicked.connect(self._on_set_clicked)
+        self.auto_sync_check.toggled.connect(self.persist_config)
+        self.color_groups_btn.clicked.connect(self.dispatch_color_groups)
+        self.clear_colors_btn.clicked.connect(self.dispatch_clear_colors)
         self.edge_hardener_btn.clicked.connect(self.process_uv_edges)
         self.tolerance_toggle.toggled.connect(self.toggle_tolerance)
         self.angle_adjuster.valueChanged.connect(self.adjust_angle)
@@ -1298,6 +1569,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             self.auto_unwrap_btn,
             self.unfold_btn,
             self.optimize_btn,
+            self.sync_groups_btn,
         ):
             btn.setEnabled(not busy)
         self._update_ops_enabled()
@@ -1696,7 +1968,32 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             sent_mtime = os.path.getmtime(fbx_export_path_str)
         except OSError:
             sent_mtime = 0
-        self.config.save_state(fbxMtimeAtSend=sent_mtime)
+        # Record face counts in FBX EXPORT order, which is DAG traversal order —
+        # NOT the selection order in `selected_items`. FBX exportSelected
+        # concatenates each mesh's polygons in depth-first DAG order regardless
+        # of how the objects were selected, and reflection maps RizomUV's flat
+        # polygon table back to objects by these cumulative counts. Recording in
+        # selection order silently mis-assigns faces whenever the two differ
+        # (verified against RizomUV 2025.0.114). Sorting the selection by its
+        # position in the scene DAG reproduces the exporter's order.
+        dag_all = cmds.ls(long=True, dag=True, type="transform") or []
+        dag_index = {name: i for i, name in enumerate(dag_all)}
+        ordered_items = sorted(
+            selected_items, key=lambda o: dag_index.get(o, len(dag_all))
+        )
+        sent_face_counts = []
+        for item in ordered_items:
+            try:
+                sent_face_counts.append(
+                    [item, int(cmds.polyEvaluate(item, face=True))]
+                )
+            except Exception as e_count:
+                logger.warning(f"Could not count faces on {item}: {e_count}")
+                sent_face_counts = []
+                break
+        self.config.save_state(
+            fbxMtimeAtSend=sent_mtime, sentFaceCounts=sent_face_counts
+        )
         return selected_items
 
     def _dispatch_to_rizom(self, run_custom_script=False, pack_after=False):
@@ -2175,6 +2472,10 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             self.config.use_live_link = new_use_live_link
             config_changed = True
             logger.debug(f"Config change: use_live_link = {new_use_live_link}")
+        new_auto_sync = self.auto_sync_check.isChecked()
+        if self.config.auto_sync_groups != new_auto_sync:
+            self.config.auto_sync_groups = new_auto_sync
+            config_changed = True
         if config_changed:
             logger.info("Configuration changed, saving...")
             if not self.config.save_config():
@@ -2286,6 +2587,172 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                 )
                 return
         self._import_fbx_uvs(target_objects)
+
+    def _build_integration_tab(self):
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        self.sync_groups_btn = QtWidgets.QPushButton("Sync Groups from RizomUV")
+        self.sync_groups_btn.setToolTip(
+            "Mirrors RizomUV's island groups, tags and UDIM tiles into Maya\n"
+            "selection sets (RZM_grp_*, RZM_tag_*, RZM_tile_*).\n"
+            "All existing RZM_* sets are replaced on each sync — they are\n"
+            "mirrors, not user data. Requires Live Link and a prior Send."
+        )
+        layout.addWidget(self.sync_groups_btn)
+        self._ops_tooltips[self.sync_groups_btn] = self.sync_groups_btn.toolTip()
+        self.auto_sync_check = QtWidgets.QCheckBox("Auto-sync after Get UVs")
+        self.auto_sync_check.setChecked(self.config.auto_sync_groups)
+        layout.addWidget(self.auto_sync_check)
+        layout.addWidget(QtWidgets.QLabel("Synced sets (click to select):"))
+        self.sets_list = QtWidgets.QListWidget()
+        self.sets_list.setToolTip("Click a set to select its faces in Maya.")
+        layout.addWidget(self.sets_list)
+        self.udim_summary_label = QtWidgets.QLabel("")
+        self.udim_summary_label.setWordWrap(True)
+        layout.addWidget(self.udim_summary_label)
+        color_row = QtWidgets.QHBoxLayout()
+        self.color_groups_btn = QtWidgets.QPushButton("Color Groups")
+        self.color_groups_btn.setToolTip(
+            "Tint each synced Rizom group/tile's faces with a distinct, stable\n"
+            "color (per-island, no bleed) and turn on vertex-color display.\n"
+            "Reversible — 'Clear Colors' removes it. Run Sync Groups first."
+        )
+        self.clear_colors_btn = QtWidgets.QPushButton("Clear Colors")
+        self.clear_colors_btn.setToolTip(
+            "Remove the Rizom group coloring and turn vertex-color display back off."
+        )
+        color_row.addWidget(self.color_groups_btn)
+        color_row.addWidget(self.clear_colors_btn)
+        layout.addLayout(color_row)
+        layout.addStretch()
+        return tab
+
+    def dispatch_color_groups(self):
+        group_sets = cmds.ls("RZM_grp_*", type="objectSet") or []
+        if not group_sets:
+            group_sets = cmds.ls("RZM_tile_*", type="objectSet") or []
+        if not group_sets:
+            self.set_feedback(
+                "No Rizom group sets to color — run Sync Groups first.",
+                level="warning",
+            )
+            return
+        cmds.undoInfo(openChunk=True, chunkName="Color Rizom Groups")
+        try:
+            count = apply_group_colors(group_sets)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        if count:
+            self.set_feedback(
+                f"Colored {count} mesh(es) by Rizom group. Turn on 'Color' in the "
+                f"viewport/UV Editor display if not already shown.",
+                level="info",
+            )
+        else:
+            self.set_feedback("Nothing colored (no mesh faces in the sets).", level="warning")
+
+    def dispatch_clear_colors(self):
+        cmds.undoInfo(openChunk=True, chunkName="Clear Rizom Colors")
+        try:
+            clear_group_colors()
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.set_feedback("Cleared Rizom group coloring.", level="info")
+
+    def _refresh_integration_tab(self, sets):
+        self.sets_list.clear()
+        tile_lines = []
+        for set_name in sorted(sets):
+            self.sets_list.addItem(set_name)
+            if set_name.startswith("RZM_tile_"):
+                per_object = sets[set_name]
+                objects = ", ".join(
+                    o.split("|")[-1] for o in sorted(per_object)
+                )
+                faces = sum(len(f) for f in per_object.values())
+                tile_lines.append(
+                    f"{set_name[len('RZM_tile_'):]}: {faces} faces ({objects})"
+                )
+        self.udim_summary_label.setText(
+            "UDIM tiles:\n" + "\n".join(tile_lines) if tile_lines else ""
+        )
+
+    def _on_set_clicked(self, item):
+        set_name = item.text()
+        if cmds.objExists(set_name):
+            cmds.select(set_name, replace=True)
+            self.set_feedback(f"Selected {set_name}.", level="info")
+        else:
+            self.set_feedback(
+                f"{set_name} no longer exists — run Sync Groups again.",
+                level="warning",
+            )
+
+    def _apply_reflection_sets(self, sets):
+        """Deletes existing RZM_* sets and creates the new mirrors. Main thread."""
+        stale = [
+            s for s in (cmds.ls("RZM_*", type="objectSet") or [])
+        ]
+        if stale:
+            cmds.delete(stale)
+        created = 0
+        for set_name, per_object in sets.items():
+            members = []
+            for obj, faces in per_object.items():
+                if not cmds.objExists(obj):
+                    logger.warning(f"Sync: {obj} no longer exists; skipping.")
+                    continue
+                members.extend(f"{obj}.f[{i}]" for i in faces)
+            if not members:
+                continue
+            new_set = cmds.sets(name=set_name, empty=True)
+            cmds.sets(members, include=new_set)
+            created += 1
+        return created
+
+    def dispatch_sync_groups(self):
+        if not self._live_link_active():
+            self.set_feedback("Sync Groups requires Live Link.", level="warning")
+            return
+        if self._busy:
+            self.set_feedback("A bridge operation is already running.", level="warning")
+            return
+        sent_face_counts = self.config.load_state().get("sentFaceCounts") or []
+        if not sent_face_counts:
+            self.set_feedback(
+                "Sync Groups needs a Send first (face counts are recorded at Send).",
+                level="warning",
+            )
+            return
+        link_mgr = self.link_mgr
+
+        def work():
+            return link_mgr.collect_reflection()
+
+        def done(ok, result):
+            self._set_busy(False)
+            if not ok:
+                self.link_mgr.disconnect()
+                self.set_feedback(f"Sync Groups failed: {result}", level="error")
+                return
+            sets = build_reflection_sets(result, sent_face_counts)
+            if not sets:
+                self.set_feedback(
+                    "Sync Groups: nothing to mirror (no groups/tags, or topology "
+                    "changed since Send — re-Send first).",
+                    level="warning",
+                )
+                self._refresh_integration_tab({})
+                return
+            created = self._apply_reflection_sets(sets)
+            self._refresh_integration_tab(sets)
+            self.set_feedback(
+                f"Synced {created} Rizom group/tag/tile set(s) into Maya.",
+                level="info",
+            )
+
+        self._set_busy(True, "Live Link: reading groups from RizomUV...")
+        self._run_async(work, done, watch_link=True)
 
     def _import_fbx_uvs(self, target_objects):
         fbx_source_path_str = self.config.get_fbx_export_path_str()
@@ -2611,6 +3078,12 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                 f"UV import failed for {num_targets} object(s). Errors: {error_count}. Check logs.",
                 level="error",
             )
+        if (
+            getattr(self.config, "auto_sync_groups", False)
+            and self._live_link_active()
+            and transfer_count > 0
+        ):
+            maya.utils.executeDeferred(self.dispatch_sync_groups)
 
     def _cleanup_import_namespace(self, namespace):
         if not cmds.namespace(exists=namespace):
@@ -2847,7 +3320,7 @@ def launch_tool():
     global rizom_bridge_panel_instance
     intended_workspace_control_name = WORKSPACE_CONTROL_NAME
     panel_object_name = "rizomUVBridgePanelInstance"
-    window_title = "RizomUV <> Maya Bridge v3.1.3"
+    window_title = "RizomUV <> Maya Bridge v3.3.0"
     logger.info(f"Launching {window_title} Tool (Manual)...")
     if cmds.workspaceControl(intended_workspace_control_name, q=True, exists=True):
         logger.warning(
