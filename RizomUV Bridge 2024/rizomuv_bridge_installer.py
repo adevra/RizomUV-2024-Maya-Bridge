@@ -19,17 +19,17 @@ try:
         from PySide6 import QtWidgets, QtCore, QtGui
         from shiboken6 import wrapInstance
 
-        logging.info("Using PySide6 for installer dialogs")
+        print("RizomBridge Installer: Using PySide6 for dialogs")
     else:
         from PySide2 import QtWidgets, QtCore, QtGui
         from shiboken2 import wrapInstance
 
-        logging.info("Using PySide2 for installer dialogs")
+        print("RizomBridge Installer: Using PySide2 for dialogs")
     QT_AVAILABLE = True
 except ImportError as e:
     QT_AVAILABLE = False
-    logging.warning(
-        f"Could not import PySide2/PySide6: {e}. UI selection for multiple RizomUV paths disabled."
+    print(
+        f"RizomBridge Installer: Could not import PySide2/PySide6: {e}. UI selection for multiple RizomUV paths disabled."
     )
 MODULE_NAME = "maya_rizomuv_bridge"
 SCRIPT_FILE_NAME = f"{MODULE_NAME}.py"
@@ -38,8 +38,12 @@ ICON_FILE_NAME = "rzmuv.png"
 SHELF_BUTTON_LABEL = "RizomUV"
 SHELF_BUTTON_TOOLTIP = "Launch RizomUV Maya Bridge"
 WORKSPACE_CONTROL_NAME = "rizomUVBridgeWorkspaceControl"
-CONFIG_DIR_NAME = "RizomUVBridge"
 CONFIG_FILE_NAME = "settings.json"
+STATE_FILE_NAME = "bridge_state.json"
+LUA_SCRIPT_FILE_NAME = "rizomuv_control_script.lua"
+LIVE_LUA_SCRIPT_FILE_NAME = "rizomuv_livelink_script.lua"
+FBX_FILE_NAME = "RizomUVMayaBridge.fbx"
+RIZOMUV_LINK_DIR_NAME = "RizomUVLink"
 STARTUP_CODE_START_MARKER = f"# --- {INSTALL_SUBDIR} Startup Logic ---"
 STARTUP_CODE_END_MARKER = f"# --- End {INSTALL_SUBDIR} Startup Logic ---"
 installer_logger = logging.getLogger("RizomBridgeInstaller")
@@ -103,17 +107,6 @@ def get_user_setup_path():
         return None
 
 
-def get_prefs_config_dir():
-    "Gets the full path to the tool's prefs/config directory."
-    try:
-        prefs_dir = Path(cmds.internalVar(userPrefDir=True))
-        config_path = prefs_dir / CONFIG_DIR_NAME
-        return config_path
-    except Exception as e:
-        installer_logger.error(f"Error determining prefs directory: {e}")
-        return None
-
-
 def get_installed_script_path():
     "Gets the expected path of the installed tool script."
     scripts_dir = get_maya_scripts_dir()
@@ -136,6 +129,52 @@ def get_installed_icon_path():
         return scripts_dir / ICON_FILE_NAME
 
 
+def _iter_shelf_buttons():
+    """Yields (control, command, label) for every shelf button on every shelf.
+
+    Uses the shelfTabLayout's child layout NAMES (not tab labels, which can
+    diverge after a shelf rename) and guards each control individually so one
+    exotic plugin control cannot abort the whole scan.
+    """
+    try:
+        shelf_tab_layout = mel.eval(
+            "global string $gShelfTopLevel; $gShelfTopLevel = $gShelfTopLevel;"
+        )
+        if not cmds.shelfTabLayout(shelf_tab_layout, query=True, exists=True):
+            return
+        all_shelves = (
+            cmds.shelfTabLayout(shelf_tab_layout, query=True, childArray=True) or []
+        )
+    except Exception as e_layout:
+        installer_logger.warning(f"Could not query shelf layouts: {e_layout}")
+        return
+    for shelf in all_shelves:
+        try:
+            if not cmds.shelfLayout(shelf, query=True, exists=True):
+                continue
+            controls = cmds.shelfLayout(shelf, query=True, childArray=True) or []
+        except Exception as e_shelf:
+            installer_logger.debug(f"Could not query shelf '{shelf}': {e_shelf}")
+            continue
+        for control in controls:
+            try:
+                if cmds.objectTypeUI(control) != "shelfButton":
+                    continue
+                if not cmds.shelfButton(control, query=True, exists=True):
+                    continue
+                cmd_string = (
+                    cmds.shelfButton(control, query=True, command=True) or ""
+                )
+                label_string = (
+                    cmds.shelfButton(control, query=True, label=True) or ""
+                )
+                yield control, cmd_string, label_string
+            except Exception as e_control:
+                installer_logger.debug(
+                    f"Skipping unreadable shelf control '{control}': {e_control}"
+                )
+
+
 def check_installation():
     "Checks if the Rizom Bridge appears to be installed."
     install_info = {"script": False, "userSetup": False, "button": False}
@@ -153,39 +192,10 @@ def check_installation():
                 f"Could not read userSetup.py '{user_setup_path}': {e}"
             )
     try:
-        shelf_tab_layout = mel.eval(
-            "global string $gShelfTopLevel; $gShelfTopLevel = $gShelfTopLevel;"
-        )
-        if cmds.shelfTabLayout(shelf_tab_layout, query=True, exists=True):
-            all_shelves = (
-                cmds.shelfTabLayout(shelf_tab_layout, query=True, tabLabel=True) or []
-            )
-            for shelf in all_shelves:
-                if cmds.shelfLayout(shelf, query=True, exists=True):
-                    controls = (
-                        cmds.shelfLayout(shelf, query=True, childArray=True) or []
-                    )
-                    for control in controls:
-                        if cmds.objectTypeUI(
-                            control
-                        ) == "shelfButton" and cmds.shelfButton(
-                            control, query=True, exists=True
-                        ):
-                            cmd_string = (
-                                cmds.shelfButton(control, query=True, command=True)
-                                or ""
-                            )
-                            label_string = (
-                                cmds.shelfButton(control, query=True, label=True) or ""
-                            )
-                            if (
-                                MODULE_NAME in cmd_string
-                                or label_string == SHELF_BUTTON_LABEL
-                            ):
-                                install_info["button"] = True
-                                break
-                if install_info["button"]:
-                    break
+        for control, cmd_string, label_string in _iter_shelf_buttons():
+            if MODULE_NAME in cmd_string or label_string == SHELF_BUTTON_LABEL:
+                install_info["button"] = True
+                break
     except Exception as e_shelf:
         installer_logger.warning(f"Error checking shelf buttons: {e_shelf}")
     if install_info["script"] and install_info["userSetup"] and install_info["button"]:
@@ -352,33 +362,13 @@ def browse_manually(parent_window):
         elif system == "Darwin":
             default_path = "/Applications"
             start_dir = default_path if os.path.isdir(default_path) else "/"
-            original_pref = 0
-            mac_pref_changed = False
-            try:
-                original_pref = cmds.optionVar(query="useOSNativeFileDialog")
-            except:
-                pass
-            if original_pref == 0:
-                try:
-                    cmds.optionVar(iv=("useOSNativeFileDialog", 1))
-                    mac_pref_changed = True
-                    installer_logger.info("Temp enabled OS Native dialog.")
-                except Exception as e:
-                    installer_logger.warning(f"Could not enable OS native dialog: {e}")
             path = QtWidgets.QFileDialog.getExistingDirectory(
                 parent_window,
                 "Select RizomUV Application (.app)",
                 start_dir,
-                QtWidgets.QFileDialog.ShowDirsOnly,
+                QtWidgets.QFileDialog.Option.ShowDirsOnly
+                | QtWidgets.QFileDialog.Option.DontUseNativeDialog,
             )
-            if mac_pref_changed:
-                try:
-                    cmds.optionVar(iv=("useOSNativeFileDialog", original_pref))
-                    installer_logger.info("Restored Maya file dialog preference.")
-                except Exception as e:
-                    installer_logger.warning(
-                        f"Could not restore file dialog preference: {e}"
-                    )
             path_tuple = (path,)
         else:
             file_filter = "RizomUV Executable/AppImage"
@@ -406,11 +396,6 @@ def browse_manually(parent_window):
             return None
     except Exception as e_dialog:
         installer_logger.error(f"Error during QFileDialog operation: {e_dialog}")
-        if mac_pref_changed:
-            try:
-                cmds.optionVar(iv=("useOSNativeFileDialog", original_pref))
-            except:
-                pass
         return None
 
 
@@ -460,8 +445,8 @@ class SelectRizomDialog(QtWidgets.QDialog):
     @staticmethod
     def get_selection(paths, parent):
         dialog = SelectRizomDialog(paths, parent)
-        result = dialog.exec_()
-        if result == QtWidgets.QDialog.Accepted:
+        result = dialog.exec()
+        if result == QtWidgets.QDialog.DialogCode.Accepted:
             return dialog.selected_path, False
         elif dialog.do_browse:
             return None, True
@@ -574,16 +559,16 @@ def update_settings_json(target_config_path, rizom_path_to_set):
     try:
         if target_config_path.is_file():
             config_data = json.loads(target_config_path.read_text(encoding="utf-8"))
-            installer_logger.info(" \xa0- Loaded existing settings.")
+            installer_logger.info("  - Loaded existing settings.")
         else:
-            installer_logger.info(" \xa0- Settings file not found, creating new.")
+            installer_logger.info("  - Settings file not found, creating new.")
         config_data["rizomPath"] = rizom_path_to_set
-        installer_logger.info(f"  - Set rizomPath to: {rizom_path_to_set}")
+        installer_logger.info(f"  - Set rizomPath to: {rizom_path_to_set}")
         target_config_path.parent.mkdir(parents=True, exist_ok=True)
         target_config_path.write_text(
             json.dumps(config_data, indent=4), encoding="utf-8"
         )
-        installer_logger.info(f"  - Saved updated settings to {target_config_path}")
+        installer_logger.info(f"  - Saved updated settings to {target_config_path}")
         return True
     except json.JSONDecodeError as e:
         installer_logger.error(
@@ -594,7 +579,7 @@ def update_settings_json(target_config_path, rizom_path_to_set):
             target_config_path.write_text(
                 json.dumps(config_data, indent=4), encoding="utf-8"
             )
-            installer_logger.info(" \xa0- Overwrote settings file.")
+            installer_logger.info("  - Overwrote settings file.")
             return True
         except Exception as e_write:
             installer_logger.error(f"Failed to overwrite settings file: {e_write}")
@@ -675,22 +660,22 @@ except Exception as e_outer: print(f"[RizomBridge UserSetup] Error: {{e_outer}}"
     if add:
         if found_block:
             installer_logger.info(
-                f"  - {INSTALL_SUBDIR} startup logic already exists, overwriting."
+                f"  - {INSTALL_SUBDIR} startup logic already exists, overwriting."
             )
         else:
             installer_logger.info(
-                f"  - Adding {INSTALL_SUBDIR} startup logic to userSetup.py."
+                f"  - Adding {INSTALL_SUBDIR} startup logic to userSetup.py."
             )
         if new_content and new_content[-1].strip() != "":
             new_content.append("")
         new_content.extend(startup_code.splitlines())
     elif found_block:
         installer_logger.info(
-            f"  - Removing {INSTALL_SUBDIR} startup logic from userSetup.py."
+            f"  - Removing {INSTALL_SUBDIR} startup logic from userSetup.py."
         )
     else:
         installer_logger.info(
-            f"  - {INSTALL_SUBDIR} startup logic not found. Nothing to remove."
+            f"  - {INSTALL_SUBDIR} startup logic not found. Nothing to remove."
         )
         return True
     try:
@@ -704,69 +689,29 @@ except Exception as e_outer: print(f"[RizomBridge UserSetup] Error: {{e_outer}}"
 
 def remove_shelf_button():
     installer_logger.info(
-        f"  - Attempting to remove shelf button: '{SHELF_BUTTON_LABEL}' or similar..."
+        f"  - Attempting to remove shelf button: '{SHELF_BUTTON_LABEL}'..."
     )
     found_and_deleted = False
     try:
-        shelf_names = []
-        shelf_tab_layout = mel.eval(
-            "global string $gShelfTopLevel; $gShelfTopLevel = $gShelfTopLevel;"
-        )
-        if cmds.shelfTabLayout(shelf_tab_layout, query=True, exists=True):
+        # Deletion requires the button's command to reference our module, so an
+        # unrelated user button that merely shares the label is left alone.
+        controls_to_delete = [
+            control
+            for control, cmd_string, label_string in _iter_shelf_buttons()
+            if MODULE_NAME in cmd_string
+        ]
+        for btn_to_del in controls_to_delete:
             try:
-                shelf_names = (
-                    cmds.shelfTabLayout(shelf_tab_layout, query=True, tabLabel=True)
-                    or []
-                )
-            except Exception as e_tab_query:
+                if cmds.control(btn_to_del, exists=True):
+                    cmds.deleteUI(btn_to_del, control=True)
+                    installer_logger.info(f"    - Deleted button '{btn_to_del}'.")
+                    found_and_deleted = True
+            except Exception as e_del:
                 installer_logger.warning(
-                    f"  - Could not query shelf tab labels: {e_tab_query}."
+                    f"    - Could not delete button '{btn_to_del}': {e_del}"
                 )
-        if not shelf_names:
-            shelf_names = ["General", "Rendering", "Modeling", "Rigging", "Animation"]
-            installer_logger.info(f"  - Checking common shelves: {shelf_names}")
-        else:
-            installer_logger.info(f"  - Checking shelves: {shelf_names}")
-        for shelf in shelf_names:
-            try:
-                if cmds.shelfLayout(shelf, query=True, exists=True):
-                    controls = (
-                        cmds.shelfLayout(shelf, query=True, childArray=True) or []
-                    )
-                    controls_to_delete = []
-                    for control in controls:
-                        if cmds.objectTypeUI(
-                            control
-                        ) == "shelfButton" and cmds.shelfButton(
-                            control, query=True, exists=True
-                        ):
-                            cmd_string = (
-                                cmds.shelfButton(control, query=True, command=True)
-                                or ""
-                            )
-                            label_string = (
-                                cmds.shelfButton(control, query=True, label=True) or ""
-                            )
-                            if (
-                                MODULE_NAME in cmd_string
-                                or label_string == SHELF_BUTTON_LABEL
-                            ):
-                                installer_logger.info(
-                                    f"    - Found button '{control}' on shelf '{shelf}'. Marking for deletion."
-                                )
-                                controls_to_delete.append(control)
-                                found_and_deleted = True
-                    if controls_to_delete:
-                        for btn_to_del in controls_to_delete:
-                            if cmds.control(btn_to_del, exists=True):
-                                cmds.deleteUI(btn_to_del, control=True)
-                                installer_logger.info(
-                                    f"    - Deleted button '{btn_to_del}'."
-                                )
-            except Exception as e_shelf:
-                installer_logger.info(f"  - Error checking shelf '{shelf}': {e_shelf}")
         if not found_and_deleted:
-            installer_logger.info(" \xa0- Shelf button not found on checked shelves.")
+            installer_logger.info("  - Shelf button not found on any shelf.")
     except Exception as e:
         installer_logger.error(f"Error during shelf button removal: {e}")
         traceback.print_exc()
@@ -796,17 +741,26 @@ def create_shelf_button(icon_path="pythonFamily.png"):
         buttons = cmds.shelfLayout(current_shelf, query=True, childArray=True) or []
         button_exists = False
         for button in buttons:
-            if cmds.objectTypeUI(button) == "shelfButton" and cmds.shelfButton(
-                button, query=True, exists=True
-            ):
-                cmd_string = cmds.shelfButton(button, query=True, command=True) or ""
-                label_string = cmds.shelfButton(button, query=True, label=True) or ""
-                if MODULE_NAME in cmd_string or label_string == SHELF_BUTTON_LABEL:
-                    installer_logger.info(
-                        f"  - Button already exists on shelf '{current_shelf}'."
+            try:
+                if cmds.objectTypeUI(button) == "shelfButton" and cmds.shelfButton(
+                    button, query=True, exists=True
+                ):
+                    cmd_string = (
+                        cmds.shelfButton(button, query=True, command=True) or ""
                     )
-                    button_exists = True
-                    break
+                    label_string = (
+                        cmds.shelfButton(button, query=True, label=True) or ""
+                    )
+                    if MODULE_NAME in cmd_string or label_string == SHELF_BUTTON_LABEL:
+                        installer_logger.info(
+                            f"  - Button already exists on shelf '{current_shelf}'."
+                        )
+                        button_exists = True
+                        break
+            except Exception as e_control:
+                installer_logger.debug(
+                    f"Skipping unreadable shelf control '{button}': {e_control}"
+                )
         if button_exists:
             return True
         module_import_path = (
@@ -835,7 +789,7 @@ except Exception as e_launch: print(f"Error launching tool from shelf: {{e_launc
             height=34,
         )
         installer_logger.info(
-            f"  - Button added to shelf '{current_shelf}' using icon '{final_icon_path}'."
+            f"  - Button added to shelf '{current_shelf}' using icon '{final_icon_path}'."
         )
         return True
     except Exception as e:
@@ -863,7 +817,7 @@ def install_tool(confirmed_rizom_path):
         try:
             install_target_dir.mkdir(parents=True, exist_ok=True)
             installer_logger.info(
-                f"  - Ensured subdirectory exists: {install_target_dir}"
+                f"  - Ensured subdirectory exists: {install_target_dir}"
             )
         except Exception as e:
             installer_logger.error(f"Error creating install subdirectory: {e}")
@@ -874,7 +828,7 @@ def install_tool(confirmed_rizom_path):
                 init_py_path.write_text(
                     f"# Package marker for {INSTALL_SUBDIR}\n", encoding="utf-8"
                 )
-                installer_logger.info(f"  - Created package file: {init_py_path}")
+                installer_logger.info(f"  - Created package file: {init_py_path}")
             except Exception as e:
                 installer_logger.error(f"Error creating __init__.py: {e}")
                 return False
@@ -893,10 +847,10 @@ def install_tool(confirmed_rizom_path):
         )
     try:
         installer_logger.info(
-            f"  - Copying '{SCRIPT_FILE_NAME}' to '{install_target_dir}'..."
+            f"  - Copying '{SCRIPT_FILE_NAME}' to '{install_target_dir}'..."
         )
         shutil.copy2(str(source_script_path), str(target_script_path))
-        installer_logger.info(" \xa0- Script copied successfully.")
+        installer_logger.info("  - Script copied successfully.")
     except Exception as e:
         installer_logger.error(f"Error copying script file: {e}")
         traceback.print_exc()
@@ -904,30 +858,45 @@ def install_tool(confirmed_rizom_path):
     if final_icon_path_for_shelf != "pythonFamily.png":
         try:
             installer_logger.info(
-                f"  - Copying '{ICON_FILE_NAME}' to '{install_target_dir}'..."
+                f"  - Copying '{ICON_FILE_NAME}' to '{install_target_dir}'..."
             )
             shutil.copy2(str(source_icon_path), str(target_icon_path))
-            installer_logger.info(" \xa0- Icon copied successfully.")
+            installer_logger.info("  - Icon copied successfully.")
         except Exception as e:
             installer_logger.error(f"Error copying icon file: {e}. Using default icon.")
             final_icon_path_for_shelf = "pythonFamily.png"
+    source_link_dir = installer_dir / RIZOMUV_LINK_DIR_NAME
+    if source_link_dir.is_dir() and platform.system() == "Windows":
+        target_link_dir = install_target_dir / RIZOMUV_LINK_DIR_NAME
+        try:
+            installer_logger.info(
+                f"  - Copying '{RIZOMUV_LINK_DIR_NAME}' (live link module) to '{install_target_dir}'..."
+            )
+            shutil.copytree(
+                str(source_link_dir), str(target_link_dir), dirs_exist_ok=True
+            )
+            installer_logger.info("  - RizomUVLink copied successfully.")
+        except Exception as e_link:
+            installer_logger.warning(
+                f"Could not copy RizomUVLink (live link falls back to the one inside the RizomUV install dir): {e_link}"
+            )
     installer_logger.info(
-        f"  - Writing Rizom path to settings file: {target_config_path}..."
+        f"  - Writing Rizom path to settings file: {target_config_path}..."
     )
     if not update_settings_json(target_config_path, confirmed_rizom_path):
         installer_logger.error("Failed to write Rizom path to settings.json.")
         return False
-    installer_logger.info(" \xa0- Settings file updated successfully.")
-    installer_logger.info(" \xa0- Modifying userSetup.py...")
+    installer_logger.info("  - Settings file updated successfully.")
+    installer_logger.info("  - Modifying userSetup.py...")
     if not modify_user_setup(add=True):
         installer_logger.error("Error modifying userSetup.py.")
         return False
-    installer_logger.info(" \xa0- userSetup.py modified successfully.")
-    installer_logger.info(" \xa0- Creating shelf button...")
+    installer_logger.info("  - userSetup.py modified successfully.")
+    installer_logger.info("  - Creating shelf button...")
     if not create_shelf_button(icon_path=final_icon_path_for_shelf):
         installer_logger.warning("Could not create shelf button.")
     else:
-        installer_logger.info(" \xa0- Shelf button created successfully.")
+        installer_logger.info("  - Shelf button created successfully.")
     install_loc_str = str(install_target_dir).replace("\\", "/")
     cmds.confirmDialog(
         title="Installation Successful",
@@ -943,7 +912,9 @@ Launch from the '{SHELF_BUTTON_LABEL}' button.
     return True
 
 
-def uninstall_tool():
+def uninstall_tool(preserve_settings=False):
+    """Removes the installed bridge. With preserve_settings=True (used by the
+    Reinstall/Update flow) settings.json is kept so user preferences survive."""
     installer_logger.info(f"\n--- Starting {INSTALL_SUBDIR} Bridge Uninstallation ---")
     success = True
     installed_script_path = get_installed_script_path()
@@ -952,34 +923,38 @@ def uninstall_tool():
         install_target_dir = installed_script_path.parent
     if installed_script_path and installed_script_path.is_file():
         try:
-            installer_logger.info(f"  - Removing script file: {installed_script_path}")
+            installer_logger.info(f"  - Removing script file: {installed_script_path}")
             installed_script_path.unlink()
-            installer_logger.info(" \xa0- Script file removed.")
+            installer_logger.info("  - Script file removed.")
         except Exception as e:
             installer_logger.error(f"Error removing script file: {e}")
             success = False
     else:
-        installer_logger.info(" \xa0- Script file not found.")
+        installer_logger.info("  - Script file not found.")
     installed_icon_path = get_installed_icon_path()
     if installed_icon_path and installed_icon_path.is_file():
         try:
-            installer_logger.info(f"  - Removing icon file: {installed_icon_path}")
+            installer_logger.info(f"  - Removing icon file: {installed_icon_path}")
             installed_icon_path.unlink()
-            installer_logger.info(" \xa0- Icon file removed.")
+            installer_logger.info("  - Icon file removed.")
         except Exception as e:
             installer_logger.error(f"Error removing icon file: {e}")
             success = False
     else:
-        installer_logger.info(" \xa0- Icon file not found.")
+        installer_logger.info("  - Icon file not found.")
     if install_target_dir and install_target_dir.is_dir():
         target_config_path = install_target_dir / CONFIG_FILE_NAME
-        if target_config_path.is_file():
+        if preserve_settings:
+            installer_logger.info(
+                f"  - Keeping settings file (update in progress): {target_config_path}"
+            )
+        elif target_config_path.is_file():
             try:
                 installer_logger.info(
-                    f"  - Removing settings file: {target_config_path}"
+                    f"  - Removing settings file: {target_config_path}"
                 )
                 target_config_path.unlink()
-                installer_logger.info(" \xa0- Settings file removed.")
+                installer_logger.info("  - Settings file removed.")
             except Exception as e:
                 installer_logger.error(
                     f"Error removing settings file '{target_config_path}': {e}"
@@ -987,38 +962,66 @@ def uninstall_tool():
                 success = False
         else:
             installer_logger.info(
-                f"  - Settings file not found at {target_config_path}."
+                f"  - Settings file not found at {target_config_path}."
             )
     if install_target_dir and install_target_dir.is_dir():
         init_py = install_target_dir / "__init__.py"
         if init_py.is_file():
             try:
-                installer_logger.info(f"  - Removing package file: {init_py}")
+                installer_logger.info(f"  - Removing package file: {init_py}")
                 init_py.unlink()
             except Exception as e:
                 installer_logger.warning(f"Error removing __init__.py file: {e}")
+        runtime_files = [
+            install_target_dir / FBX_FILE_NAME,
+            install_target_dir / LUA_SCRIPT_FILE_NAME,
+            install_target_dir / LIVE_LUA_SCRIPT_FILE_NAME,
+            install_target_dir / STATE_FILE_NAME,
+        ]
+        runtime_files.extend(install_target_dir.glob("settings.corrupt_*.bak"))
+        for runtime_file in runtime_files:
+            if runtime_file.is_file():
+                try:
+                    installer_logger.info(f"  - Removing runtime file: {runtime_file}")
+                    runtime_file.unlink()
+                except Exception as e:
+                    installer_logger.warning(
+                        f"Error removing runtime file '{runtime_file}': {e}"
+                    )
+        for runtime_dir in ("__pycache__", RIZOMUV_LINK_DIR_NAME):
+            dir_path = install_target_dir / runtime_dir
+            if dir_path.is_dir():
+                try:
+                    installer_logger.info(f"  - Removing directory: {dir_path}")
+                    shutil.rmtree(str(dir_path))
+                except Exception as e:
+                    installer_logger.warning(
+                        f"Error removing directory '{dir_path}': {e}. If the live "
+                        f"link was used this session its DLLs are locked by Maya — "
+                        f"restart Maya and delete the folder manually."
+                    )
     if INSTALL_SUBDIR and install_target_dir and install_target_dir.is_dir():
         try:
             if not any(install_target_dir.iterdir()):
                 installer_logger.info(
-                    f"  - Removing empty subdirectory: {install_target_dir}"
+                    f"  - Removing empty subdirectory: {install_target_dir}"
                 )
                 install_target_dir.rmdir()
-                installer_logger.info(" \xa0- Removed empty subdirectory.")
+                installer_logger.info("  - Removed empty subdirectory.")
             else:
                 installer_logger.info(
-                    f"  - Info: Subdirectory {install_target_dir} not empty, leaving it."
+                    f"  - Info: Subdirectory {install_target_dir} not empty, leaving it."
                 )
         except OSError as e_os:
             installer_logger.info(
-                f"  - Info: Subdirectory {install_target_dir} could not be removed (might still contain files or lack permissions): {e_os}"
+                f"  - Info: Subdirectory {install_target_dir} could not be removed (might still contain files or lack permissions): {e_os}"
             )
         except Exception as e:
             installer_logger.warning(
-                f"  - Warning: Error checking/removing subdirectory {install_target_dir}: {e}"
+                f"  - Warning: Error checking/removing subdirectory {install_target_dir}: {e}"
             )
     installer_logger.info(
-        f"  - Modifying userSetup.py to remove {INSTALL_SUBDIR} block..."
+        f"  - Modifying userSetup.py to remove {INSTALL_SUBDIR} block..."
     )
     if not modify_user_setup(add=False):
         installer_logger.warning(
@@ -1026,20 +1029,20 @@ def uninstall_tool():
         )
     else:
         installer_logger.info(
-            " \xa0- userSetup.py modification successful (or block not found)."
+            "  - userSetup.py modification successful (or block not found)."
         )
-    installer_logger.info(" \xa0- Removing shelf button (if found)...")
+    installer_logger.info("  - Removing shelf button (if found)...")
     remove_shelf_button()
     if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, q=True, exists=True):
         installer_logger.info(
-            f"  - Closing/deleting workspace control: {WORKSPACE_CONTROL_NAME}"
+            f"  - Closing/deleting workspace control: {WORKSPACE_CONTROL_NAME}"
         )
         try:
             cmds.deleteUI(WORKSPACE_CONTROL_NAME, control=True)
-            installer_logger.info(" \xa0 - Workspace control deleted.")
+            installer_logger.info("   - Workspace control deleted.")
         except Exception as e:
             installer_logger.warning(
-                f"  - Warning: Could not delete workspace control: {e}"
+                f"  - Warning: Could not delete workspace control: {e}"
             )
     if success:
         installer_logger.info(f"\n{INSTALL_SUBDIR} Bridge Uninstallation Completed.")
@@ -1066,7 +1069,7 @@ def run_main_logic():
         )
         if result == "Reinstall/Update":
             installer_logger.info("--- Starting Reinstallation ---")
-            if uninstall_tool():
+            if uninstall_tool(preserve_settings=True):
                 confirmed_path = confirm_rizom_path(maya_window)
                 if confirmed_path:
                     install_tool(confirmed_path)
@@ -1090,7 +1093,7 @@ def run_main_logic():
         )
         if result == "Attempt Reinstall":
             installer_logger.info("--- Attempting Reinstallation ---")
-            uninstall_tool()
+            uninstall_tool(preserve_settings=True)
             confirmed_path = confirm_rizom_path(maya_window)
             if confirmed_path:
                 install_tool(confirmed_path)
