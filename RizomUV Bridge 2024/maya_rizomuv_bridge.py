@@ -50,6 +50,7 @@ SHELF_BUTTON_TOOLTIP = "Launch RizomUV Maya Bridge"
 WORKSPACE_CONTROL_NAME = "rizomUVBridgeWorkspaceControl"
 CONFIG_FILE_NAME = "settings.json"
 STATE_FILE_NAME = "bridge_state.json"
+LOG_FILE_NAME = "bridge.log"
 LUA_SCRIPT_FILE_NAME = "rizomuv_control_script.lua"
 LIVE_LUA_SCRIPT_FILE_NAME = "rizomuv_livelink_script.lua"
 FBX_FILE_NAME = "RizomUVMayaBridge.fbx"
@@ -80,7 +81,7 @@ BRIDGE_ASCII_ART = r"""
  --.+#   ##   ##  -##      ##     ### ##  ##. ## ---- ##   -## -. ## # .-+-- 
  --.##+.  ##. ##.-########  ######.   ## .  . ##.----. #####  .--. ##+ ---+- 
                                                                                                                    
-> RizomUV - Maya Bridge v3.3.0
+> RizomUV - Maya Bridge v3.3.1
      >    https://www.rizomuv.com/virtual-spaces/#bridges   
      >    https://github.com/adevra/RizomUV-2024-Maya-Bridge
                                                                                               
@@ -121,6 +122,31 @@ def find_rizomuv_installations():
                 found.append(candidate)
     return sorted(set(found), reverse=True)
 
+def _add_file_handler():
+    """Mirrors the log to RZMUV/bridge.log.
+
+    The Script Editor is lost when Maya is killed mid-operation, so a live-link
+    hang or freeze can only be diagnosed from the last line written to disk.
+    The logger survives module reloads, so this is idempotent.
+    """
+    if any(isinstance(h, logging.FileHandler) for h in logger.handlers):
+        return
+    try:
+        fh = logging.FileHandler(
+            Path(__file__).resolve().parent / LOG_FILE_NAME, mode="a", encoding="utf-8"
+        )
+    except OSError as e_log:
+        print(f"RizomBridge: could not open log file ({e_log}); console only.")
+        return
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        )
+    )
+    logger.addHandler(fh)
+
+
 def setup_logging(level=logging.ERROR):
     if not logger.handlers:
         logger.setLevel(level)
@@ -131,11 +157,13 @@ def setup_logging(level=logging.ERROR):
         ch.setLevel(logging.DEBUG)
         ch.setFormatter(formatter)
         logger.addHandler(ch)
+        _add_file_handler()
         logger.propagate = False
         logger.info(
             f"RizomBridge logger initialized with level {logging.getLevelName(level)}."
         )
     else:
+        _add_file_handler()
         current_level = logger.level
         if current_level != level:
             logger.setLevel(level)
@@ -696,6 +724,23 @@ class _LaunchTimeout(Exception):
     """RizomUV launched but never serviced the readiness query."""
 
 
+# A CRizomUVLink whose Execute never got an answer can never be destroyed: its
+# ZMQ context blocks forever on the undelivered request (linger is infinite and
+# the module exposes no close/linger control). Releasing the last reference to
+# one hangs the calling thread — on the bridge's worker thread that is the GIL
+# holder, so Maya freezes with no way out. Such links are parked here for the
+# rest of the session instead of being dropped.
+_parked_links = []
+
+
+def _park_link(link):
+    if link is None:
+        return
+    if not any(parked is link for parked in _parked_links):
+        _parked_links.append(link)
+        logger.debug(f"Parked an unusable RizomUVLink ({len(_parked_links)} total).")
+
+
 class RizomLinkManager:
     """Manages a persistent RizomUV instance driven through RizomUVLink (ZMQ).
 
@@ -718,6 +763,7 @@ class RizomLinkManager:
         self._proc = None
         self._module = None
         self._import_error = None
+        self._link_poisoned = False
         self._lock = threading.Lock()
 
     def available(self):
@@ -777,12 +823,28 @@ class RizomLinkManager:
         if self._link is None or self._port is None:
             return False
         try:
+            # Never send a request to a port nothing is listening on: the
+            # request would sit undelivered and poison the link for good.
+            if not self._link.TCPPortIsOpen(self._port):
+                return False
+        except Exception:
+            return False
+        try:
             self._link.rizomuv.Execute("Get", "Vars.Infos.Version.Full", 5000)
             return True
         except Exception:
-            # A timed-out probe breaks the ZMQ REQ socket; the link object
-            # must be discarded by the caller.
+            # A timed-out probe breaks the ZMQ REQ socket permanently; the
+            # link object must be dropped through _drop_link, never released.
+            self._link_poisoned = True
             return False
+
+    def _drop_link(self):
+        """Forgets the current link, parking it if it can no longer be destroyed."""
+        if self._link_poisoned:
+            _park_link(self._link)
+        self._link = None
+        self._port = None
+        self._link_poisoned = False
 
     def _try_reconnect(self):
         """Reconnects to a RizomUV instance from a previous Maya session/reload.
@@ -814,6 +876,8 @@ class RizomLinkManager:
             logger.info(f"Reconnected to running RizomUV on port {port}.")
             return True
         except Exception as e_reconnect:
+            # The probe went unanswered — this link can never be destroyed.
+            _park_link(link)
             raise RuntimeError(
                 f"A process on port {port} (probably a busy RizomUV) is not "
                 f"answering. Wait for RizomUV to finish its current operation "
@@ -825,8 +889,7 @@ class RizomLinkManager:
         with self._lock:
             if self.is_connected():
                 return self._link
-            self._link = None
-            self._port = None
+            self._drop_link()
             if self._try_reconnect():
                 return self._link
             raise RuntimeError(
@@ -847,8 +910,7 @@ class RizomLinkManager:
         with self._lock:
             if self.is_connected():
                 return self._link
-            self._link = None
-            self._port = None
+            self._drop_link()
             if self._try_reconnect():
                 return self._link
             module = self._import_link_module()
@@ -906,6 +968,9 @@ class RizomLinkManager:
         except Exception as e_wait:
             self._kill_process(proc)
             self._proc = None
+            # The readiness query went unanswered — this link is unusable and
+            # must not be released, or the retry below would freeze Maya.
+            _park_link(link)
             raise _LaunchTimeout(
                 f"no readiness within {self.READY_TIMEOUT_SEC}s ({e_wait})"
             )
@@ -932,7 +997,11 @@ class RizomLinkManager:
         if self._link is None:
             raise RuntimeError("Live link is not connected.")
         timeout = timeout_ms or self.DEFAULT_TIMEOUT_MS
-        result = self._link.rizomuv.Execute(task_name, params or {}, timeout)
+        try:
+            result = self._link.rizomuv.Execute(task_name, params or {}, timeout)
+        except Exception:
+            self._link_poisoned = True
+            raise
         if isinstance(result, dict) and result.get("Error"):
             err = result["Error"]
             raise RuntimeError(
@@ -948,6 +1017,7 @@ class RizomLinkManager:
             parts = str(version).replace("RizomUV", "").strip().split(".")
             return tuple(int(p) for p in parts[:2])
         except Exception:
+            self._link_poisoned = True
             return (2024, 0)
 
     def has_instance(self):
@@ -1025,8 +1095,10 @@ class RizomLinkManager:
         return {"polyToIsland": list(poly_to_island), "groups": groups, "tags": tags}
 
     def disconnect(self):
-        self._link = None
-        self._port = None
+        # Callers reach here after a failed task, so assume the link never got
+        # its answer and is no longer safe to destroy.
+        self._link_poisoned = True
+        self._drop_link()
         self._proc = None
 
 
@@ -2537,7 +2609,9 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             def work():
                 # Never launch RizomUV from Get: a fresh instance would save
                 # its empty scene over the bridge FBX.
+                logger.info("Get: worker started, checking the live link...")
                 link_mgr.require_connected()
+                logger.info("Get: link is up, asking RizomUV to save...")
                 link_mgr.exec_task(
                     "Save",
                     {
@@ -2545,9 +2619,11 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                         "File.UVWProps": True,
                     },
                 )
+                logger.info("Get: RizomUV finished saving.")
                 return True
 
             def done(ok, result):
+                logger.info(f"Get: back on the main thread (ok={ok}).")
                 self._set_busy(False)
                 if not ok:
                     self.link_mgr.disconnect()
@@ -2784,6 +2860,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             mel.eval("FBXResetImport;")
             mel.eval("FBXImportMode -v Add;")
             mel.eval("FBXImportGenerateLog -v false;")
+            logger.info("Get: importing the bridge FBX into Maya...")
             imported_nodes = cmds.file(
                 fbx_source_path_str,
                 i=True,
@@ -2881,6 +2958,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                     continue
                 src_shape = source_shapes[0]
                 trg_shape = target_shapes[0]
+                logger.info(f"Get: transferring UVs onto {trg_shape}...")
                 try:
                     src_uv_sets = (
                         cmds.polyUVSet(src_shape, query=True, allUVSets=True) or []
@@ -2895,12 +2973,24 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                     )
                     logger.info(f"Source UV sets: {src_uv_sets}")
                     logger.debug(f"Target UV sets before: {trg_uv_sets}")
+                    source_uv_set = specific_uv_set
                     if specific_uv_set and specific_uv_set not in src_uv_sets:
-                        logger.error(
-                            f"UV set '{specific_uv_set}' not found in RizomUV output for {target_transform} (has: {src_uv_sets}). Skipping."
-                        )
-                        error_count += 1
-                        continue
+                        if len(src_uv_sets) == 1:
+                            # A fresh unwrap (Send without existing UVs) sends
+                            # geometry only, so RizomUV has no set names to
+                            # preserve and returns its one channel under its own
+                            # name. With a single candidate there is nothing to
+                            # guess: route it into the set the user asked for.
+                            source_uv_set = src_uv_sets[0]
+                            logger.info(
+                                f"RizomUV returned one UV set '{source_uv_set}'; writing it into '{specific_uv_set}' on {target_transform}."
+                            )
+                        else:
+                            logger.error(
+                                f"UV set '{specific_uv_set}' not found in RizomUV output for {target_transform} (has: {src_uv_sets}). Skipping."
+                            )
+                            error_count += 1
+                            continue
                     sets_to_ensure = (
                         [specific_uv_set] if specific_uv_set else src_uv_sets
                     )
@@ -2931,24 +3021,58 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                     continue
                 transfer_successful_for_object = False
                 original_selection = cmds.ls(sl=True, long=True)
+                # polyTransfer is by far the cheaper path — ~0.1s against the
+                # ~35s that baking transferAttributes history costs on a
+                # 115k-face mesh — but baking it rewrites the target's whole UV
+                # set list from the source, which EMPTIES any target set the
+                # source does not carry (verified: a target uvSet2 with 24
+                # assigned UVs comes back unreadable). So it is only safe when
+                # the source covers every set the target has.
+                trg_uv_sets = cmds.polyUVSet(trg_shape, query=True, allUVSets=True) or []
+                poly_transfer_is_lossless = set(trg_uv_sets) <= set(src_uv_sets)
+                if not poly_transfer_is_lossless:
+                    logger.debug(
+                        f"{trg_shape} has UV sets RizomUV did not return "
+                        f"({sorted(set(trg_uv_sets) - set(src_uv_sets))}); using "
+                        f"transferAttributes so they are not wiped."
+                    )
+                used_transfer_attributes = not poly_transfer_is_lossless or (
+                    bool(specific_uv_set)
+                    and (
+                        source_uv_set != specific_uv_set
+                        or src_uv_sets != [specific_uv_set]
+                    )
+                )
                 try:
                     cmds.select(trg_shape, replace=True)
-                    if specific_uv_set:
-                        cmds.transferAttributes(
-                            src_shape,
-                            trg_shape,
-                            transferPositions=0,
-                            transferNormals=0,
-                            transferUVs=1,
-                            sourceUvSet=specific_uv_set,
-                            targetUvSet=specific_uv_set,
-                            transferColors=0,
-                            sampleSpace=5,
-                            searchMethod=3,
+                    if used_transfer_attributes:
+                        transfer_pairs = (
+                            [(source_uv_set, specific_uv_set)]
+                            if specific_uv_set
+                            else [(s_set, s_set) for s_set in src_uv_sets]
                         )
-                        logger.info(
-                            f"Transferred UV set '{specific_uv_set}' from '{src_shape}' to '{trg_shape}'."
-                        )
+                        for from_set, to_set in transfer_pairs:
+                            cmds.transferAttributes(
+                                src_shape,
+                                trg_shape,
+                                transferPositions=0,
+                                transferNormals=0,
+                                transferUVs=1,
+                                sourceUvSet=from_set,
+                                targetUvSet=to_set,
+                                transferColors=0,
+                                # Topology space. The round trip never changes
+                                # the mesh, so this is exact and skips the
+                                # spatial search entirely; the old value 5 is
+                                # outside the documented 0-4 range and segfaults
+                                # Maya 2027 on dense meshes.
+                                sampleSpace=4,
+                                searchMethod=3,
+                            )
+                            logger.info(
+                                f"Transferred UV set '{from_set}' from '{src_shape}' "
+                                f"into '{to_set}' on '{trg_shape}'."
+                            )
                     else:
                         cmds.polyTransfer(
                             trg_shape,
@@ -2959,13 +3083,14 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                             ch=False,
                         )
                         logger.info(
-                            f"Ran polyTransfer (uv=True) from '{src_shape}' to '{trg_shape}' (all matching sets)."
+                            f"Ran polyTransfer (uv=True) from '{src_shape}' to '{trg_shape}' "
+                            f"({'set ' + repr(specific_uv_set) if specific_uv_set else 'all matching sets'})."
                         )
                     transfer_successful_for_object = True
                     try:
                         cmds.delete(trg_shape, constructionHistory=True)
                     except Exception as e_hist:
-                        if specific_uv_set:
+                        if used_transfer_attributes:
                             # transferAttributes is a live history node; if it
                             # cannot be baked (e.g. referenced mesh), deleting
                             # the imported source would destroy the result.
@@ -3052,7 +3177,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                 except Exception as e_undo:
                     logger.warning(f"Rollback undo failed: {e_undo}")
             self._cleanup_import_namespace(import_namespace)
-        logger.info("Forcing UI Refresh after UV transfer attempts.")
+        logger.info("Get: transfers finished, refreshing the UI.")
         cmds.refresh(force=True)
         if target_objects and all(cmds.objExists(o) for o in target_objects):
             cmds.select(target_objects, replace=True)
@@ -3320,7 +3445,7 @@ def launch_tool():
     global rizom_bridge_panel_instance
     intended_workspace_control_name = WORKSPACE_CONTROL_NAME
     panel_object_name = "rizomUVBridgePanelInstance"
-    window_title = "RizomUV <> Maya Bridge v3.3.0"
+    window_title = "RizomUV <> Maya Bridge v3.3.1"
     logger.info(f"Launching {window_title} Tool (Manual)...")
     if cmds.workspaceControl(intended_workspace_control_name, q=True, exists=True):
         logger.warning(

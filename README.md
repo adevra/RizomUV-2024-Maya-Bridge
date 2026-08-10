@@ -2,7 +2,7 @@
 
 # RIZOM UV 2024 - Autodesk MAYA Bridge
 
-**Version 3.3.0** | **Author:** A. Devran | **GitHub:** [https://github.com/adevra/RizomUV-2024-Maya-Bridge](https://github.com/adevra/RizomUV-2024-Maya-Bridge)
+**Version 3.3.1** | **Author:** A. Devran | **GitHub:** [https://github.com/adevra/RizomUV-2024-Maya-Bridge](https://github.com/adevra/RizomUV-2024-Maya-Bridge)
 
 **RizomUV - Maya Bridge** is a bridge plugin for **Autodesk Maya** (2022–2027) and **RizomUV 2024+**, for a convenient, native like UV unwrapping and packing workflow. Works on Windows, macOS, and Linux.
 
@@ -11,7 +11,7 @@
 ## Features
 
 ### Two connection modes
-- **Live Link (Windows, default):** drives one persistent RizomUV instance directly over a local link. Send/Get are synchronous and reliable. "Get UVs" asks RizomUV to save its current state first, so you can never import stale UVs, and long operations run without freezing Maya. Built on Rizom-Lab's open-source RizomUVLink library (a separate MIT project, bundled here unmodified). Automatically retries a flaky RizomUV launch and aborts cleanly if RizomUV crashes mid-operation.
+- **Live Link (Windows, default):** drives one persistent RizomUV instance directly over a local link. Send/Get are synchronous and reliable. "Get UVs" asks RizomUV to save its current state first, so you can never import stale UVs. Maya waits while RizomUV works, so the window is unresponsive until an operation finishes. Built on Rizom-Lab's open-source RizomUVLink library (a separate MIT project, bundled here unmodified). Automatically retries a flaky RizomUV launch and aborts cleanly if RizomUV crashes mid-operation.
 - **Classic (macOS/Linux, or when Live Link is off):** the original file + Lua workflow, launching RizomUV per operation. Includes a staleness guard that warns if RizomUV hasn't re-saved since you sent.
 
 ### Bridge tab (send / get)

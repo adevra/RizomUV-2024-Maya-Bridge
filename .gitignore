@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 tests/_livelink_stub.lua
 tests/_ops_out.fbx
+bridge.log
