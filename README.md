@@ -2,7 +2,7 @@
 
 # RIZOM UV 2024 - Autodesk MAYA Bridge
 
-**Version 3.3.1** | **Author:** A. Devran | **GitHub:** [https://github.com/adevra/RizomUV-2024-Maya-Bridge](https://github.com/adevra/RizomUV-2024-Maya-Bridge)
+**Version 3.3.2** | **Author:** A. Devran | **GitHub:** [https://github.com/adevra/RizomUV-2024-Maya-Bridge](https://github.com/adevra/RizomUV-2024-Maya-Bridge)
 
 **RizomUV - Maya Bridge** is a bridge plugin for **Autodesk Maya** (2022–2027) and **RizomUV 2024+**, for a convenient, native like UV unwrapping and packing workflow. Works on Windows, macOS, and Linux.
 
@@ -16,6 +16,7 @@
 
 ### Bridge tab (send / get)
 - Send meshes to RizomUV and retrieve UVs, with **namespace- and duplicate-name-safe object matching**.
+- **Instance-aware:** an instanced object is sent once, not once per instance, and the UVs you get back apply to all of its instances.
 - **UV set support:** the Target/Source UV Set is honored on both Send *and* Get; pick a specific set, or "All UV Sets" to transfer everything.
 - **Custom Lua scripts** run against your mesh in RizomUV (both modes).
 - **Harden UV Shell Edges:** soften/harden normals along UV borders in one click. Great for game assets.
@@ -57,7 +58,7 @@ The panel has three tabs plus a Settings header (RizomUV path + the **Use Live L
 - **Run Custom Lua Script** / **Harden UV Shell Edges** as needed.
 
 **Rizom Ops tab (Live Link)**
-- Pick an **Auto Unwrap** algorithm and click it, or use **Unfold** / **Optimize**, or set up a **Pack preset** and click **Auto Pack UV Set**. Each runs the whole round trip and imports the result, no Send/Get needed. Maya stays responsive while RizomUV works.
+- Pick an **Auto Unwrap** algorithm and click it, or use **Unfold** / **Optimize**, or set up a **Pack preset** and click **Auto Pack UV Set**. Each runs the whole round trip and imports the result, no Send/Get needed. Maya waits while RizomUV works.
 
 **Integration tab (Live Link)**
 - **Sync Groups from RizomUV** to create the `RZM_*` selection sets and UDIM summary (or enable auto-sync). Click a set to select it. **Color Groups** to visualize the group layout; **Clear Colors** to remove it.

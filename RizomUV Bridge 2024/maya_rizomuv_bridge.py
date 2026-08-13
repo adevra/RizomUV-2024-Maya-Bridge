@@ -54,6 +54,7 @@ LOG_FILE_NAME = "bridge.log"
 LUA_SCRIPT_FILE_NAME = "rizomuv_control_script.lua"
 LIVE_LUA_SCRIPT_FILE_NAME = "rizomuv_livelink_script.lua"
 FBX_FILE_NAME = "RizomUVMayaBridge.fbx"
+EXPORT_TEMP_GROUP = "RZMUV_EXPORT_TEMP"
 RIZOMUV_LINK_DIR_NAME = "RizomUVLink"
 BRIDGE_ASCII_ART = r"""                                                                            
  +++++-+-------++---------++---------.  .---+-+++-+++--+-+++---+---+------++ 
@@ -81,7 +82,7 @@ BRIDGE_ASCII_ART = r"""
  --.+#   ##   ##  -##      ##     ### ##  ##. ## ---- ##   -## -. ## # .-+-- 
  --.##+.  ##. ##.-########  ######.   ## .  . ##.----. #####  .--. ##+ ---+- 
                                                                                                                    
-> RizomUV - Maya Bridge v3.3.1
+> RizomUV - Maya Bridge v3.3.2
      >    https://www.rizomuv.com/virtual-spaces/#bridges   
      >    https://github.com/adevra/RizomUV-2024-Maya-Bridge
                                                                                               
@@ -700,6 +701,73 @@ def clear_group_colors():
                 cmds.setAttr(shape + ".displayColors", 0)
         except Exception as e_clear:
             logger.debug(f"Clear colors on {shape}: {e_clear}")
+
+
+def build_export_nodes(mesh_transforms):
+    """Resolves which transforms to hand the FBX exporter so each shape is sent once.
+
+    Maya's FBX exporter writes EVERY DAG path of a selected shape, so selecting
+    one instance drags its siblings into the file. No FBXExport flag changes that
+    (FBXExportInstances on or off both export all three paths of a 3-instance
+    shape). Instanced transforms are therefore exported as throwaway de-instanced
+    copies parented under a temp group, which keeps their leaf names -- Get
+    matches imported objects to the selection by leaf name. Transforms sharing a
+    shape collapse to one, since a transfer onto that shape covers all of them.
+
+    Returns (export_nodes, origin_by_export_node, temp_group_or_None). The caller
+    must delete the temp group once the export is finished.
+    """
+    export_nodes, origin, seen_shapes = [], {}, {}
+    temp_group = None
+    for item in mesh_transforms:
+        shapes = cmds.listRelatives(
+            item, shapes=True, type="mesh", noIntermediate=True, fullPath=True
+        ) or []
+        if not shapes:
+            continue
+        try:
+            shape_id = cmds.ls(shapes[0], uuid=True)[0]
+        except Exception:
+            shape_id = shapes[0]
+        if shape_id in seen_shapes:
+            logger.info(
+                f"Skipping {item}: it shares its shape with {seen_shapes[shape_id]}, "
+                "which is already being sent."
+            )
+            continue
+        seen_shapes[shape_id] = item
+        if len(cmds.ls(shapes[0], allPaths=True, long=True) or []) <= 1:
+            export_nodes.append(item)
+            origin[item] = item
+            continue
+        try:
+            if temp_group is None:
+                temp_group = cmds.ls(
+                    cmds.group(empty=True, world=True, name=EXPORT_TEMP_GROUP),
+                    long=True,
+                )[0]
+            copy = cmds.ls(
+                cmds.duplicate(item, returnRootsOnly=True, inputConnections=False)[0],
+                long=True,
+            )[0]
+            for child in cmds.listRelatives(
+                copy, children=True, type="transform", fullPath=True
+            ) or []:
+                cmds.delete(child)
+            copy = cmds.ls(cmds.parent(copy, temp_group)[0], long=True)[0]
+            copy = cmds.ls(cmds.rename(copy, item.split("|")[-1]), long=True)[0]
+        except Exception as e_copy:
+            logger.warning(
+                f"Could not de-instance {item} ({e_copy}); its instances will be "
+                "sent to RizomUV as well."
+            )
+            export_nodes.append(item)
+            origin[item] = item
+            continue
+        logger.info(f"Sending instanced {item} as a single de-instanced copy.")
+        export_nodes.append(copy)
+        origin[copy] = item
+    return export_nodes, origin, temp_group
 
 
 config = None
@@ -1985,7 +2053,13 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                 f"Failed to create directory for FBX export: {Path(fbx_export_path_str).parent} - {e_mkdir}"
             )
             return
+        export_items, export_origin, temp_group = build_export_nodes(selected_items)
+        if not export_items:
+            self.set_feedback("Error: Nothing left to export.", level="error")
+            logger.error("build_export_nodes returned no nodes to export.")
+            return
         export_successful = False
+        sent_face_counts = []
         try:
             mel.eval("FBXResetExport;")
             mel.eval("FBXExportSmoothingGroups -v true;")
@@ -1994,7 +2068,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             mel.eval("FBXExportConstraints -v false;")
             mel.eval("FBXExportBakeComplexAnimation -v false;")
             mel.eval("FBXExportUpAxis y;")
-            cmds.select(selected_items, replace=True)
+            cmds.select(export_items, replace=True)
             cmds.file(
                 fbx_export_path_str,
                 force=True,
@@ -2005,6 +2079,31 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             )
             logger.info(f"Exported selection to: {fbx_export_path_str}")
             export_successful = True
+            # Face counts go in FBX EXPORT order, which is DAG traversal order --
+            # NOT the selection order. FBX exportSelected concatenates each mesh's
+            # polygons in depth-first DAG order regardless of how the objects were
+            # selected, and reflection maps RizomUV's flat polygon table back to
+            # objects by these cumulative counts. Recording in selection order
+            # silently mis-assigns faces whenever the two differ (verified against
+            # RizomUV 2025.0.114). Sorting by position in the scene DAG reproduces
+            # the exporter's order. This has to run before the temp de-instance
+            # copies are deleted, and reports the originals they stand in for.
+            dag_all = cmds.ls(long=True, dag=True, type="transform") or []
+            dag_index = {name: i for i, name in enumerate(dag_all)}
+            for node in sorted(
+                export_items, key=lambda o: dag_index.get(o, len(dag_all))
+            ):
+                try:
+                    sent_face_counts.append(
+                        [
+                            export_origin.get(node, node),
+                            int(cmds.polyEvaluate(node, face=True)),
+                        ]
+                    )
+                except Exception as e_count:
+                    logger.warning(f"Could not count faces on {node}: {e_count}")
+                    sent_face_counts = []
+                    break
         except Exception as e_export:
             self.set_feedback(f"Error during FBX export: {e_export}", level="error")
             logger.error("FBX Export failed.", exc_info=True)
@@ -2033,6 +2132,13 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                         logger.warning(
                             f"Could not restore original UV set '{original_set}' on {shape_node}: {e_restore}"
                         )
+            if temp_group and cmds.objExists(temp_group):
+                try:
+                    cmds.delete(temp_group)
+                except Exception as e_temp:
+                    logger.warning(
+                        f"Could not delete the temp export group {temp_group}: {e_temp}"
+                    )
             cmds.select(selected_items, replace=True)
         if not export_successful:
             return
@@ -2040,33 +2146,10 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             sent_mtime = os.path.getmtime(fbx_export_path_str)
         except OSError:
             sent_mtime = 0
-        # Record face counts in FBX EXPORT order, which is DAG traversal order —
-        # NOT the selection order in `selected_items`. FBX exportSelected
-        # concatenates each mesh's polygons in depth-first DAG order regardless
-        # of how the objects were selected, and reflection maps RizomUV's flat
-        # polygon table back to objects by these cumulative counts. Recording in
-        # selection order silently mis-assigns faces whenever the two differ
-        # (verified against RizomUV 2025.0.114). Sorting the selection by its
-        # position in the scene DAG reproduces the exporter's order.
-        dag_all = cmds.ls(long=True, dag=True, type="transform") or []
-        dag_index = {name: i for i, name in enumerate(dag_all)}
-        ordered_items = sorted(
-            selected_items, key=lambda o: dag_index.get(o, len(dag_all))
-        )
-        sent_face_counts = []
-        for item in ordered_items:
-            try:
-                sent_face_counts.append(
-                    [item, int(cmds.polyEvaluate(item, face=True))]
-                )
-            except Exception as e_count:
-                logger.warning(f"Could not count faces on {item}: {e_count}")
-                sent_face_counts = []
-                break
         self.config.save_state(
             fbxMtimeAtSend=sent_mtime, sentFaceCounts=sent_face_counts
         )
-        return selected_items
+        return [export_origin.get(node, node) for node in export_items]
 
     def _dispatch_to_rizom(self, run_custom_script=False, pack_after=False):
         rizom_path_str = str(self.config.rizom_location)
@@ -2914,6 +2997,8 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         transfer_count = 0
         error_count = 0
         processed_targets = set()
+        processed_shapes = set()
+        instance_skips = 0
         rollback_needed = False
         cmds.undoInfo(openChunk=True, chunkName="Fetch Rizom UVs")
         try:
@@ -2921,6 +3006,28 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                 if target_transform in processed_targets:
                     continue
                 processed_targets.add(target_transform)
+                # Instances share one shape, so a transfer onto the first one
+                # covers the rest. Send only sent that one, so looking for the
+                # others in the FBX would just report them as missing.
+                own_shapes = (
+                    cmds.listRelatives(
+                        target_transform, s=True, ni=True, f=True, type="mesh"
+                    )
+                    or []
+                )
+                if own_shapes:
+                    try:
+                        shape_id = cmds.ls(own_shapes[0], uuid=True)[0]
+                    except Exception:
+                        shape_id = own_shapes[0]
+                    if shape_id in processed_shapes:
+                        logger.info(
+                            f"Skipping {target_transform}: it is an instance of an "
+                            "object whose UVs were already updated."
+                        )
+                        instance_skips += 1
+                        continue
+                    processed_shapes.add(shape_id)
                 target_leaf_name = fbx_leaf_name(target_transform)
                 logger.debug(
                     f"Processing target: {target_transform} (FBX leaf name: {target_leaf_name})"
@@ -3184,7 +3291,9 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         else:
             cmds.select(clear=True)
         self.refresh_uv_options()
-        num_targets = len(target_objects)
+        # Instances of an already-updated shape are not pending work: they were
+        # updated by the transfer onto the shape they share.
+        num_targets = len(target_objects) - instance_skips
         if error_count == 0 and transfer_count == num_targets:
             self.set_feedback(
                 f"UVs imported to {transfer_count} object(s) ({'set ' + repr(specific_uv_set) if specific_uv_set else 'all matching sets'}).",
@@ -3445,7 +3554,7 @@ def launch_tool():
     global rizom_bridge_panel_instance
     intended_workspace_control_name = WORKSPACE_CONTROL_NAME
     panel_object_name = "rizomUVBridgePanelInstance"
-    window_title = "RizomUV <> Maya Bridge v3.3.1"
+    window_title = "RizomUV <> Maya Bridge v3.3.2"
     logger.info(f"Launching {window_title} Tool (Manual)...")
     if cmds.workspaceControl(intended_workspace_control_name, q=True, exists=True):
         logger.warning(
