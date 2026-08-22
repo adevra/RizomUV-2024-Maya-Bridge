@@ -9,6 +9,7 @@ import platform
 import sys
 import logging
 import json
+import plistlib
 import re as _re
 import shutil
 import threading
@@ -82,7 +83,7 @@ BRIDGE_ASCII_ART = r"""
  --.+#   ##   ##  -##      ##     ### ##  ##. ## ---- ##   -## -. ## # .-+-- 
  --.##+.  ##. ##.-########  ######.   ## .  . ##.----. #####  .--. ##+ ---+- 
                                                                                                                    
-> RizomUV - Maya Bridge v3.3.2
+> RizomUV - Maya Bridge v3.3.3
      >    https://www.rizomuv.com/virtual-spaces/#bridges   
      >    https://github.com/adevra/RizomUV-2024-Maya-Bridge
                                                                                               
@@ -93,6 +94,30 @@ PATH_DEFAULTS = {
     "Darwin": "/Applications/RizomUV 2024.1.app",
     "Linux": "/usr/local/bin/rizomuv",
 }
+
+
+def resolve_macos_executable(app_path):
+    """Returns the binary inside a macOS .app bundle.
+
+    RizomUV does not name it after the bundle: 2025.0 installs as
+    RizomUV.2025.0.app and the old hardcoded Contents/MacOS/RizomUV was simply
+    not there, so every launch failed with errno 2. Info.plist's
+    CFBundleExecutable is authoritative; if it cannot be read, take the one
+    executable sitting in Contents/MacOS.
+    """
+    macos_dir = Path(app_path) / "Contents" / "MacOS"
+    try:
+        with open(str(Path(app_path) / "Contents" / "Info.plist"), "rb") as plist_file:
+            exe_name = plistlib.load(plist_file).get("CFBundleExecutable")
+        if exe_name and (macos_dir / exe_name).is_file():
+            return macos_dir / exe_name
+    except Exception as e_plist:
+        logger.debug(f"Could not read CFBundleExecutable from {app_path}: {e_plist}")
+    if macos_dir.is_dir():
+        for candidate in sorted(macos_dir.iterdir()):
+            if candidate.is_file() and os.access(str(candidate), os.X_OK):
+                return candidate
+    return macos_dir / "RizomUV"
 
 
 def find_rizomuv_installations():
@@ -2162,7 +2187,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             if rizom_path_str.endswith(".app"):
                 if rizom_path.is_dir():
                     path_valid = True
-                    potential_exe = rizom_path / "Contents" / "MacOS" / "RizomUV"
+                    potential_exe = resolve_macos_executable(rizom_path)
                     if not potential_exe.exists():
                         logger.warning(
                             f"Cannot find expected executable inside {rizom_path}."
@@ -2298,9 +2323,7 @@ class UVBridgePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         try:
             exe_to_launch = rizom_path_str
             if system == "Darwin" and rizom_path_str.endswith(".app"):
-                exe_to_launch = str(
-                    Path(rizom_path_str) / "Contents" / "MacOS" / "RizomUV"
-                )
+                exe_to_launch = str(resolve_macos_executable(rizom_path_str))
             cmd = [exe_to_launch, "-cfi", lua_script_path_str]
             cmd_str_log = " ".join(f'"{c}"' for c in cmd)
             popen_kwargs = {
@@ -3554,7 +3577,7 @@ def launch_tool():
     global rizom_bridge_panel_instance
     intended_workspace_control_name = WORKSPACE_CONTROL_NAME
     panel_object_name = "rizomUVBridgePanelInstance"
-    window_title = "RizomUV <> Maya Bridge v3.3.2"
+    window_title = "RizomUV <> Maya Bridge v3.3.3"
     logger.info(f"Launching {window_title} Tool (Manual)...")
     if cmds.workspaceControl(intended_workspace_control_name, q=True, exists=True):
         logger.warning(

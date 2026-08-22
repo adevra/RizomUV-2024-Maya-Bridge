@@ -2,7 +2,7 @@
 
 # RIZOM UV 2024 - Autodesk MAYA Bridge
 
-**Version 3.3.2** | **Author:** A. Devran | **GitHub:** [https://github.com/adevra/RizomUV-2024-Maya-Bridge](https://github.com/adevra/RizomUV-2024-Maya-Bridge)
+**Version 3.3.3** | **Author:** A. Devran | **GitHub:** [https://github.com/adevra/RizomUV-2024-Maya-Bridge](https://github.com/adevra/RizomUV-2024-Maya-Bridge)
 
 **RizomUV - Maya Bridge** is a bridge plugin for **Autodesk Maya** (2022–2027) and **RizomUV 2024+**, for a convenient, native like UV unwrapping and packing workflow. Works on Windows, macOS, and Linux.
 
